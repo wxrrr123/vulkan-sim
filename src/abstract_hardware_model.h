@@ -1244,6 +1244,7 @@ public:
       arch_reg.dst[i] = -1;
     }
     isize = 0;
+    is_reorder = false;
   }
   bool valid() const { return m_decoded; }
   virtual void print_insn(FILE *fp) const
@@ -1280,6 +1281,7 @@ public:
 
   address_type pc; // program counter address of instruction
   unsigned isize;  // size of instruction in bytes
+  bool is_reorder; // reorder_thread_nv: handled by the SM reorder unit
   op_type op;      // opcode (uarch visible)
 
   barrier_type bar_type;
