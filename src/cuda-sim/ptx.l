@@ -197,6 +197,7 @@ get_element_32 TC; yylval->int_value = GET_ELEMENT_32_OP; return OPCODE;
 set_element_32 TC; yylval->int_value = SET_ELEMENT_32_OP; return OPCODE;
 txl TC; yylval->int_value = TXL_OP; return OPCODE;
 shader_clock TC; yylval->int_value = SHADER_CLOCK_OP; return OPCODE;
+reorder_thread_nv TC; yylval->int_value = REORDER_THREAD_NV_OP; return OPCODE;
 copysignf TC; yylval->int_value = COPYSIGNF_OP; return OPCODE;
 report_ray_intersection TC; yylval->int_value = REPORT_RAY_INTERSECTION_OP; return OPCODE;
 ignore_ray_intersection TC; yylval->int_value = IGNORE_RAY_INTERSECTION_OP; return OPCODE;
