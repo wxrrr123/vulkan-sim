@@ -63,14 +63,17 @@ const struct gpgpu_ptx_sim_info *ptx_sim_kernel_info(
  * This class functionally executes a kernel. It uses the basic data structures
  * and procedures in core_t
  */
-class functionalCoreSim : public core_t {
- public:
+class functionalCoreSim : public core_t
+{
+public:
   functionalCoreSim(kernel_info_t *kernel, gpgpu_sim *g, unsigned warp_size)
-      : core_t(g, kernel, warp_size, kernel->threads_per_cta()) {
+      : core_t(g, kernel, warp_size, kernel->threads_per_cta())
+  {
     m_warpAtBarrier = new bool[m_warp_count];
     m_liveThreadCount = new unsigned[m_warp_count];
   }
-  virtual ~functionalCoreSim() {
+  virtual ~functionalCoreSim()
+  {
     warp_exit(0);
     delete[] m_liveThreadCount;
     delete[] m_warpAtBarrier;
@@ -78,17 +81,20 @@ class functionalCoreSim : public core_t {
   //! executes all warps till completion
   void execute(int inst_count, unsigned ctaid_cp);
   virtual void warp_exit(unsigned warp_id);
-  virtual bool warp_waiting_at_barrier(unsigned warp_id) const {
+  virtual bool warp_waiting_at_barrier(unsigned warp_id) const
+  {
     return (m_warpAtBarrier[warp_id] || !(m_liveThreadCount[warp_id] > 0));
   }
 
- private:
+private:
   void executeWarp(unsigned, bool &, bool &);
   // initializes threads in the CTA block which we are executing
   void initializeCTA(unsigned ctaid_cp);
   virtual void checkExecutionStatusAndUpdate(warp_inst_t &inst, unsigned t,
-                                             unsigned tid) {
-    if (m_thread[tid] == NULL || m_thread[tid]->is_done()) {
+                                             unsigned tid)
+  {
+    if (m_thread[tid] == NULL || m_thread[tid]->is_done())
+    {
       m_liveThreadCount[tid / m_warp_size]--;
     }
   }
@@ -101,8 +107,8 @@ class functionalCoreSim : public core_t {
   bool *m_warpAtBarrier;
 };
 
-#define RECONVERGE_RETURN_PC ((address_type)-2)
-#define NO_BRANCH_DIVERGENCE ((address_type)-1)
+#define RECONVERGE_RETURN_PC ((address_type) - 2)
+#define NO_BRANCH_DIVERGENCE ((address_type) - 1)
 address_type get_return_pc(void *thd);
 const char *get_ptxinfo_kname();
 void print_ptxinfo();
@@ -110,17 +116,20 @@ void clear_ptxinfo();
 struct gpgpu_ptx_sim_info get_ptxinfo();
 
 class gpgpu_recon_t;
-struct rec_pts {
+struct rec_pts
+{
   gpgpu_recon_t *s_kernel_recon_points;
   int s_num_recon;
 };
 
-class cuda_sim {
- public:
-  cuda_sim(gpgpu_context *ctx) {
+class cuda_sim
+{
+public:
+  cuda_sim(gpgpu_context *ctx)
+  {
     g_ptx_sim_num_insn = 0;
     g_ptx_kernel_count =
-        -1;  // used for classification stat collection purposes
+        -1; // used for classification stat collection purposes
     gpgpu_param_num_shaders = 0;
     g_cuda_launch_blocking = false;
     g_inst_classification_stat = NULL;
@@ -150,11 +159,11 @@ class cuda_sim {
   int cp_cta_resume;
   int g_ptxinfo_error_detected;
   unsigned g_ptx_sim_num_insn;
-  
+
   // Ray tracing memory access type stats
   unsigned g_rt_mem_access_type[static_cast<int>(TransactionType::UNDEFINED)] = {0};
-  unsigned g_rt_num_hits = 0; 
-  unsigned g_rt_num_any_hits = 0; 
+  unsigned g_rt_num_hits = 0;
+  unsigned g_rt_num_any_hits = 0;
   bool g_rt_world_set = false;
   float3 g_rt_world_min = {0, 0, 0};
   float3 g_rt_world_max = {0, 0, 0};
@@ -162,20 +171,21 @@ class cuda_sim {
   unsigned g_n_closesthit_rays = 0;
   unsigned g_max_nodes_per_ray = 0;
   unsigned g_tot_nodes_per_ray = 0;
+  unsigned g_tot_traversal_steps = 0;
   unsigned g_max_tree_depth = 0;
   unsigned g_total_shaders = 0;
   unsigned long long g_inst_type_latency[28] = {0};
   unsigned g_inst_class_stat[16][20] = {};
-  std::vector<std::pair<unsigned, unsigned> > g_traceray_instructions;
-  
+  std::vector<std::pair<unsigned, unsigned>> g_traceray_instructions;
+
   char *cdp_latency_str;
-  int g_ptx_kernel_count;  // used for classification stat collection purposes
+  int g_ptx_kernel_count; // used for classification stat collection purposes
   std::map<const void *, std::string>
-      g_global_name_lookup;  // indexed by hostVar
+      g_global_name_lookup; // indexed by hostVar
   std::map<const void *, std::string>
-      g_const_name_lookup;  // indexed by hostVar
-  int g_ptx_sim_mode;  // if non-zero run functional simulation only (i.e., no
-                       // notion of a clock cycle)
+      g_const_name_lookup; // indexed by hostVar
+  int g_ptx_sim_mode;      // if non-zero run functional simulation only (i.e., no
+                           // notion of a clock cycle)
   unsigned gpgpu_param_num_shaders;
   class std::map<function_info *, rec_pts> g_rpts;
   bool g_cuda_launch_blocking;

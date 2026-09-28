@@ -26,6 +26,8 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
+// clang-format off
+
 #include "abstract_hardware_model.h"
 #include <sys/stat.h>
 #include <algorithm>
@@ -940,6 +942,68 @@ void warp_inst_t::set_rt_mem_transactions(unsigned int tid, std::vector<MemoryTr
   }
 }
 
+// clang-format on
+
+// void warp_inst_t::set_rt_mem_transactions(unsigned int tid, std::vector<MemoryTransactionRecord> transactions)
+// {
+//   // Initialize
+//   if (!m_per_scalar_thread_valid)
+//   {
+//     m_per_scalar_thread.resize(m_config->warp_size);
+//     m_per_scalar_thread_valid = true;
+//   }
+
+//   // Sort memory transaction records by address to handle adjacent blocks
+//   std::sort(transactions.begin(), transactions.end(), [](const MemoryTransactionRecord &a, const MemoryTransactionRecord &b)
+//             { return a.address < b.address; });
+
+//   std::vector<MemoryTransactionRecord> merged_transactions;
+//   uint64_t current_base_addr = 0;
+//   uint32_t current_size = 0;
+//   TransactionType current_type = TransactionType::UNDEFINED;
+
+//   for (auto it = transactions.begin(); it != transactions.end(); ++it)
+//   {
+//     if (it->type != TransactionType::INT_BVH_NODE && it->type != TransactionType::INT_BVH_PRIMITIVE_INSTANCE)
+//     {
+//       merged_transactions.push_back(MemoryTransactionRecord(it->address, it->size, it->type));
+//       continue;
+//     }
+
+//     uint64_t addr = (uint64_t)it->address;
+
+//     // Check if a new merged block needs to be started
+//     bool start_new_merge = (current_size == 0) ||            // First initialization
+//                            (current_type != it->type) ||     // Different TransactionType
+//                            (addr >= current_base_addr + 64); // Non-contiguous address
+
+//     if (start_new_merge)
+//     {
+//       if (current_size > 0)
+//         merged_transactions.push_back(MemoryTransactionRecord((uint8_t *)current_base_addr, current_size, current_type));
+
+//       // Align to previous 64-byte boundary
+//       current_base_addr = addr & ~63;
+//       current_type = it->type;
+//     }
+
+//     // current_size = addr - current_base_addr + it->size;
+//     current_size = 64;
+//   }
+
+//   if (current_size > 0)
+//     merged_transactions.push_back(MemoryTransactionRecord((uint8_t *)current_base_addr, current_size, current_type));
+
+//   // Add merged records to the specified thread's RT_mem_accesses list
+//   for (const auto &record : merged_transactions)
+//   {
+//     RTMemoryTransactionRecord mem_record((new_addr_type)record.address, record.size, record.type);
+//     m_per_scalar_thread[tid].RT_mem_accesses.push_back(mem_record);
+//   }
+// }
+
+// clang-format off
+
 void warp_inst_t::set_rt_mem_store_transactions(unsigned int tid, std::vector<MemoryStoreTransactionRecord>& transactions) {
   m_per_scalar_thread[tid].RT_store_transactions = transactions;
 }
@@ -1144,7 +1208,8 @@ bool warp_inst_t::process_returned_mem_access(bool &mem_record_done, unsigned ti
         mem_record_done = true;
 
         // Mark triangle hit to store to memory
-        if (mem_record.type == TransactionType::BVH_QUAD_LEAF_HIT) {
+        if (mem_record.type == TransactionType::BVH_QUAD_LEAF_HIT ||
+            mem_record.type == TransactionType::BVH_PRIMITIVE_INSTANCE) {
           m_per_scalar_thread[tid].ray_intersect = true;
           RT_DPRINTF("Buffer store detected for warp %d thread %d\n", m_uid, tid);
         }
@@ -3178,3 +3243,5 @@ void core_t::get_pdom_stack_top_info(unsigned warpId, unsigned *pc, unsigned *rp
     m_simt_tables[warpId]->get_pdom_active_split_info(pc, rpc);
   }
 }
+
+// clang-format on

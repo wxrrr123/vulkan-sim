@@ -11,6 +11,14 @@ ray_coherence_engine::ray_coherence_engine(unsigned sid, struct ray_coherence_co
   m_stats = stats;
   m_schedule_packet_id = 0;
 
+  // These are never given an initializer at the declaration (ray_coherency_engine.h)
+  // and were left unset here too, so cycle()'s very first invariant check
+  // (m_num_ray_pool_rays + m_num_scheduled_rays == m_total_rays) compared
+  // three garbage values before a single ray had ever been inserted.
+  m_total_rays = 0;
+  m_num_ray_pool_rays = 0;
+  m_num_scheduled_rays = 0;
+
   m_scheduled_packets.resize(m_config.max_packets);
 }
 
@@ -160,6 +168,10 @@ void ray_coherence_engine::cycle() {
           // Find largest packet
           ray_hash hash;
           coherence_packet *selected_packet = get_largest_packet(hash);
+          // Pool is fully drained (e.g. by earlier iterations of this same
+          // loop) even though m_num_ray_pool_rays was > 0 when this cycle
+          // started: nothing left to schedule this cycle.
+          if (!selected_packet) break;
           COHERENCE_DPRINTF("Shader %d: Scheduling new packet [%d] with 0x%x\n", m_sid, i, hash);
 
           // Move rays (schedule)
@@ -182,12 +194,21 @@ void ray_coherence_engine::cycle() {
 coherence_packet * ray_coherence_engine::get_largest_packet(ray_hash &hash) {
   // Find the largest coherence packet
   unsigned largest_packet = 0;
+  bool found = false;
   for (auto it=m_ray_pool.cbegin(); it!=m_ray_pool.cend(); it++) {
     if (it->second.size() > largest_packet) {
       hash = it->first;
       largest_packet = it->second.size();
+      found = true;
     }
   }
+
+  // Every packet in the pool is already fully drained (size 0): there is
+  // nothing left to schedule. Returning without ever having assigned `hash`
+  // would leave it uninitialized, and m_ray_pool[hash] would then silently
+  // create a spurious empty entry keyed on garbage. Signal "nothing found"
+  // explicitly instead.
+  if (!found) return nullptr;
 
   return &m_ray_pool[hash];
 }

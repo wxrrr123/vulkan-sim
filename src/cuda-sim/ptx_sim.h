@@ -46,7 +46,8 @@
 #define GCC_VERSION \
   (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__)
 
-struct param_t {
+struct param_t
+{
   const void *pdata;
   int type;
   size_t size;
@@ -58,8 +59,10 @@ struct param_t {
 #include "memory.h"
 
 using half_float::half;
-union ptx_reg_t {
-  ptx_reg_t() {
+union ptx_reg_t
+{
+  ptx_reg_t()
+  {
     bits.ms = 0;
     bits.ls = 0;
     u128.low = 0;
@@ -78,7 +81,8 @@ union ptx_reg_t {
     f64 = 0;
     pred = 0;
   }
-  ptx_reg_t(unsigned x) {
+  ptx_reg_t(unsigned x)
+  {
     bits.ms = 0;
     bits.ls = 0;
     u128.low = 0;
@@ -103,16 +107,19 @@ union ptx_reg_t {
   operator unsigned char() { return u8; }
   operator unsigned long long() { return u64; }
 
-  void mask_and(unsigned ms, unsigned ls) {
+  void mask_and(unsigned ms, unsigned ls)
+  {
     bits.ms &= ms;
     bits.ls &= ls;
   }
 
-  void mask_or(unsigned ms, unsigned ls) {
+  void mask_or(unsigned ms, unsigned ls)
+  {
     bits.ms |= ms;
     bits.ls |= ls;
   }
-  int get_bit(unsigned bit) {
+  int get_bit(unsigned bit)
+  {
     if (bit < 32)
       return (bits.ls >> bit) & 1;
     else
@@ -135,11 +142,13 @@ union ptx_reg_t {
 #endif
   float f32;
   double f64;
-  struct {
+  struct
+  {
     unsigned ls;
     unsigned ms;
   } bits;
-  struct {
+  struct
+  {
     unsigned int lowest;
     unsigned int low;
     unsigned int high;
@@ -154,8 +163,9 @@ class symbol_table;
 class function_info;
 class ptx_thread_info;
 
-class ptx_cta_info {
- public:
+class ptx_cta_info
+{
+public:
   ptx_cta_info(unsigned sm_idx, gpgpu_context *ctx);
   void add_thread(ptx_thread_info *thd);
   unsigned num_threads() const;
@@ -167,7 +177,7 @@ class ptx_cta_info {
   void inc_bar_threads();
   void reset_bar_threads();
 
- private:
+private:
   // backward pointer
   class gpgpu_context *gpgpu_ctx;
   unsigned m_bar_threads;
@@ -178,21 +188,24 @@ class ptx_cta_info {
   std::set<ptx_thread_info *> m_dangling_pointers;
 };
 
-class ptx_warp_info {
- public:
-  ptx_warp_info();  // add get_core or something, or threads?
+class ptx_warp_info
+{
+public:
+  ptx_warp_info(); // add get_core or something, or threads?
   unsigned get_done_threads() const;
   void inc_done_threads();
   void reset_done_threads();
 
- private:
+private:
   unsigned m_done_threads;
 };
 
 class symbol;
 
-struct stack_entry {
-  stack_entry() {
+struct stack_entry
+{
+  stack_entry()
+  {
     m_symbol_table = NULL;
     m_func_info = NULL;
     m_PC = 0;
@@ -204,7 +217,8 @@ struct stack_entry {
   }
   stack_entry(symbol_table *s, function_info *f, unsigned pc, unsigned rpc,
               const symbol *return_var_src, const symbol *return_var_dst,
-              unsigned call_uid) {
+              unsigned call_uid)
+  {
     m_symbol_table = s;
     m_func_info = f;
     m_PC = pc;
@@ -225,9 +239,11 @@ struct stack_entry {
   unsigned m_call_uid;
 };
 
-class ptx_version {
- public:
-  ptx_version() {
+class ptx_version
+{
+public:
+  ptx_version()
+  {
     m_valid = false;
     m_ptx_version = 0;
     m_ptx_extensions = 0;
@@ -235,14 +251,16 @@ class ptx_version {
     m_texmode_unified = true;
     m_map_f64_to_f32 = true;
   }
-  ptx_version(float ver, unsigned extensions) {
+  ptx_version(float ver, unsigned extensions)
+  {
     m_valid = true;
     m_ptx_version = ver;
     m_ptx_extensions = extensions;
     m_sm_version_valid = false;
     m_texmode_unified = true;
   }
-  void set_target(const char *sm_ver, const char *ext, const char *ext2) {
+  void set_target(const char *sm_ver, const char *ext, const char *ext2)
+  {
     assert(m_valid);
     m_sm_version_str = sm_ver;
     check_target_extension(ext);
@@ -250,22 +268,27 @@ class ptx_version {
     sscanf(sm_ver, "%u", &m_sm_version);
     m_sm_version_valid = true;
   }
-  float ver() const {
+  float ver() const
+  {
     assert(m_valid);
     return m_ptx_version;
   }
-  unsigned target() const {
+  unsigned target() const
+  {
     assert(m_valid && m_sm_version_valid);
     return m_sm_version;
   }
-  unsigned extensions() const {
+  unsigned extensions() const
+  {
     assert(m_valid);
     return m_ptx_extensions;
   }
 
- private:
-  void check_target_extension(const char *ext) {
-    if (ext) {
+private:
+  void check_target_extension(const char *ext)
+  {
+    if (ext)
+    {
       if (!strcmp(ext, "texmode_independent"))
         m_texmode_unified = false;
       else if (!strcmp(ext, "texmode_unified"))
@@ -289,13 +312,15 @@ class ptx_version {
 
 struct Vulkan_RT_thread_data;
 
-class ptx_thread_info {
- public:
+class ptx_thread_info
+{
+public:
   ~ptx_thread_info();
   ptx_thread_info(kernel_info_t &kernel);
 
   void init(gpgpu_t *gpu, core_t *core, unsigned sid, unsigned cta_id,
-            unsigned wid, unsigned tid, bool fsim) {
+            unsigned wid, unsigned tid, bool fsim)
+  {
     m_gpu = gpu;
     m_core = core;
     m_hw_sid = sid;
@@ -351,7 +376,8 @@ class ptx_thread_info {
   //   return launch_id;
   // }
 
-  class gpgpu_sim *get_gpu() {
+  class gpgpu_sim *get_gpu()
+  {
     return (gpgpu_sim *)m_gpu;
   }
   unsigned get_hw_tid() const { return m_hw_tid; }
@@ -369,7 +395,8 @@ class ptx_thread_info {
   dram_callback_t last_callback() const { return m_last_dram_callback; }
   unsigned long long get_cta_uid() { return m_cta_info->get_sm_idx(); }
 
-  void set_single_thread_single_block() {
+  void set_single_thread_single_block()
+  {
     m_ntid.x = 1;
     m_ntid.y = 1;
     m_ntid.z = 1;
@@ -397,7 +424,8 @@ class ptx_thread_info {
   bool is_done() { return m_thread_done; }
   unsigned donecycle() const { return m_cycle_done; }
 
-  unsigned next_instr() {
+  unsigned next_instr()
+  {
     m_icount++;
     m_branch_taken = false;
     return m_PC;
@@ -420,7 +448,8 @@ class ptx_thread_info {
   bool rpc_updated() const { return m_RPC_updated; }
   bool last_was_call() const { return m_last_was_call; }
   unsigned get_rpc() const { return m_RPC; }
-  void clearRPC() {
+  void clearRPC()
+  {
     m_RPC = -1;
     m_RPC_updated = false;
     m_last_was_call = false;
@@ -430,7 +459,8 @@ class ptx_thread_info {
   void dump_regs(FILE *fp);
   ptx_reg_t get_reg(std::string regName);
   void dump_modifiedregs(FILE *fp);
-  void clear_modifiedregs() {
+  void clear_modifiedregs()
+  {
     m_debug_trace_regs_modified.back().clear();
     m_debug_trace_regs_read.back().clear();
   }
@@ -439,7 +469,8 @@ class ptx_thread_info {
   void push_breakaddr(const operand_info &breakaddr);
   const operand_info &pop_breakaddr();
   void enable_debug_trace() { m_enable_debug_trace = true; }
-  unsigned get_local_mem_stack_pointer() const {
+  unsigned get_local_mem_stack_pointer() const
+  {
     return m_local_mem_stack_pointer;
   }
 
@@ -447,26 +478,33 @@ class ptx_thread_info {
   memory_space *get_tex_memory() { return m_gpu->get_tex_memory(); }
   memory_space *get_surf_memory() { return m_gpu->get_surf_memory(); }
   memory_space *get_param_memory() { return m_kernel.get_param_memory(); }
-  const gpgpu_functional_sim_config &get_config() const {
+  const gpgpu_functional_sim_config &get_config() const
+  {
     return m_gpu->get_config();
   }
   bool isInFunctionalSimulationMode() { return m_functionalSimulationMode; }
-  void exitCore() {
+  void exitCore()
+  {
     // m_core is not used in case of functional simulation mode
-    if (!m_functionalSimulationMode) m_core->warp_exit(m_hw_wid);
+    if (!m_functionalSimulationMode)
+      m_core->warp_exit(m_hw_wid);
   }
 
   void registerExit() { m_cta_info->register_thread_exit(this); }
-  unsigned get_reduction_value(unsigned ctaid, unsigned barid) {
+  unsigned get_reduction_value(unsigned ctaid, unsigned barid)
+  {
     return m_core->get_reduction_value(ctaid, barid);
   }
-  void and_reduction(unsigned ctaid, unsigned barid, bool value) {
+  void and_reduction(unsigned ctaid, unsigned barid, bool value)
+  {
     m_core->and_reduction(ctaid, barid, value);
   }
-  void or_reduction(unsigned ctaid, unsigned barid, bool value) {
+  void or_reduction(unsigned ctaid, unsigned barid, bool value)
+  {
     m_core->or_reduction(ctaid, barid, value);
   }
-  void popc_reduction(unsigned ctaid, unsigned barid, bool value) {
+  void popc_reduction(unsigned ctaid, unsigned barid, bool value)
+  {
     m_core->popc_reduction(ctaid, barid, value);
   }
   // void print_all_symbols() {
@@ -484,7 +522,7 @@ class ptx_thread_info {
 
   // Jin: get corresponding kernel grid for CDP purpose
   kernel_info_t &get_kernel() { return m_kernel; }
-  
+
   void set_rt_transactions(std::vector<MemoryTransactionRecord> transactions) { RT_transactions = transactions; }
   void set_rt_store_transactions(std::vector<MemoryStoreTransactionRecord> store_transactions) { RT_store_transactions = store_transactions; }
   void set_txl_transactions(std::vector<ImageMemoryTransactionRecord> transaction);
@@ -492,7 +530,7 @@ class ptx_thread_info {
   void add_ray_intersect() { m_num_ray_intersections += 1; }
   void add_ray_properties(Ray ray) { m_ray = ray; }
 
- public:
+public:
   addr_t m_last_effective_address;
   std::vector<addr_t> m_last_effective_addresses;
   unsigned m_last_effective_size;
@@ -505,11 +543,11 @@ class ptx_thread_info {
   ptx_warp_info *m_warp_info;
   ptx_cta_info *m_cta_info;
   ptx_reg_t m_last_set_operand_value;
-  Vulkan_RT_thread_data* RT_thread_data;
+  Vulkan_RT_thread_data *RT_thread_data;
   std::vector<MemoryTransactionRecord> RT_transactions;
   std::vector<MemoryStoreTransactionRecord> RT_store_transactions;
 
- private:
+private:
   bool m_functionalSimulationMode;
   unsigned m_uid;
   kernel_info_t &m_kernel;
@@ -550,8 +588,8 @@ class ptx_thread_info {
   std::list<reg_map_t> m_debug_trace_regs_read;
   bool m_enable_debug_trace;
 
-  std::stack<class operand_info, std::vector<operand_info> > m_breakaddrs;
-  
+  std::stack<class operand_info, std::vector<operand_info>> m_breakaddrs;
+
   unsigned m_num_ray_intersections;
   Ray m_ray;
 };

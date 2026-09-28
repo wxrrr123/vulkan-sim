@@ -34,13 +34,16 @@
 
 template <unsigned BSIZE>
 memory_space_impl<BSIZE>::memory_space_impl(std::string name,
-                                            unsigned hash_size) {
+                                            unsigned hash_size)
+{
   m_name = name;
   MEM_MAP_RESIZE(hash_size);
 
   m_log2_block_size = -1;
-  for (unsigned n = 0, mask = 1; mask != 0; mask <<= 1, n++) {
-    if (BSIZE & mask) {
+  for (unsigned n = 0, mask = 1; mask != 0; mask <<= 1, n++)
+  {
+    if (BSIZE & mask)
+    {
       assert(m_log2_block_size == (unsigned)-1);
       m_log2_block_size = n;
     }
@@ -50,7 +53,8 @@ memory_space_impl<BSIZE>::memory_space_impl(std::string name,
 
 template <unsigned BSIZE>
 void memory_space_impl<BSIZE>::write_only(mem_addr_t offset, mem_addr_t index,
-                                          size_t length, const void *data) {
+                                          size_t length, const void *data)
+{
   m_data[index].write(offset, length, (const unsigned char *)data);
 }
 
@@ -58,43 +62,53 @@ template <unsigned BSIZE>
 void memory_space_impl<BSIZE>::write(mem_addr_t addr, size_t length,
                                      const void *data,
                                      class ptx_thread_info *thd,
-                                     const ptx_instruction *pI) {
-  if(!use_external_launcher) {
-    void* vulkan_addr = find_vulkan_buffer(addr);
+                                     const ptx_instruction *pI)
+{
+  if (!use_external_launcher)
+  {
+    void *vulkan_addr = find_vulkan_buffer(addr);
 
-    if (vulkan_addr) {
+    if (vulkan_addr)
+    {
       memcpy(vulkan_addr, data, length);
     }
-    else {
+    else
+    {
       printf("gpgpusim: WARNING: Memory backing buffer not found for address %p. This data write may be invalid\n", addr);
       memcpy(addr, data, length);
     }
   }
-  else {
+  else
+  {
     mem_addr_t index = addr >> m_log2_block_size;
 
-    if ((addr + length) <= (index + 1) * BSIZE) {
+    if ((addr + length) <= (index + 1) * BSIZE)
+    {
       // fast route for intra-block access
       unsigned offset = addr & (BSIZE - 1);
       unsigned nbytes = length;
       m_data[index].write(offset, nbytes, (const unsigned char *)data);
-    } else {
+    }
+    else
+    {
       // slow route for inter-block access
       unsigned nbytes_remain = length;
       unsigned src_offset = 0;
       mem_addr_t current_addr = addr;
 
-      while (nbytes_remain > 0) {
+      while (nbytes_remain > 0)
+      {
         unsigned offset = current_addr & (BSIZE - 1);
         mem_addr_t page = current_addr >> m_log2_block_size;
         mem_addr_t access_limit = offset + nbytes_remain;
-        if (access_limit > BSIZE) {
+        if (access_limit > BSIZE)
+        {
           access_limit = BSIZE;
         }
 
         size_t tx_bytes = access_limit - offset;
         m_data[page].write(offset, tx_bytes,
-                          &((const unsigned char *)data)[src_offset]);
+                           &((const unsigned char *)data)[src_offset]);
 
         // advance pointers
         src_offset += tx_bytes;
@@ -103,9 +117,11 @@ void memory_space_impl<BSIZE>::write(mem_addr_t addr, size_t length,
       }
       assert(nbytes_remain == 0);
     }
-    if (!m_watchpoints.empty()) {
+    if (!m_watchpoints.empty())
+    {
       std::map<unsigned, mem_addr_t>::iterator i;
-      for (i = m_watchpoints.begin(); i != m_watchpoints.end(); i++) {
+      for (i = m_watchpoints.begin(); i != m_watchpoints.end(); i++)
+      {
         mem_addr_t wa = i->second;
         if (((addr <= wa) && ((addr + length) > wa)) ||
             ((addr > wa) && (addr < (wa + 4))))
@@ -119,8 +135,10 @@ void memory_space_impl<BSIZE>::write(mem_addr_t addr, size_t length,
 template <unsigned BSIZE>
 void memory_space_impl<BSIZE>::read_single_block(mem_addr_t blk_idx,
                                                  mem_addr_t addr, size_t length,
-                                                 void *data) const {
-  if ((addr + length) > (blk_idx + 1) * BSIZE) {
+                                                 void *data) const
+{
+  if ((addr + length) > (blk_idx + 1) * BSIZE)
+  {
     printf(
         "GPGPU-Sim PTX: ERROR * access to memory \'%s\' is unaligned : "
         "addr=0x%x, length=%zu\n",
@@ -132,12 +150,15 @@ void memory_space_impl<BSIZE>::read_single_block(mem_addr_t blk_idx,
     throw 1;
   }
   typename map_t::const_iterator i = m_data.find(blk_idx);
-  if (i == m_data.end()) {
+  if (i == m_data.end())
+  {
     for (size_t n = 0; n < length; n++)
       ((unsigned char *)data)[n] = (unsigned char)0;
     // printf("GPGPU-Sim PTX:  WARNING reading %zu bytes from unititialized
     // memory at address 0x%x in space %s\n", length, addr, m_name.c_str() );
-  } else {
+  }
+  else
+  {
     unsigned offset = addr & (BSIZE - 1);
     unsigned nbytes = length;
     i->second.read(offset, nbytes, (unsigned char *)data);
@@ -145,50 +166,63 @@ void memory_space_impl<BSIZE>::read_single_block(mem_addr_t blk_idx,
 }
 
 template <unsigned BSIZE>
-void* memory_space_impl<BSIZE>::find_vulkan_buffer(mem_addr_t addr) const {
+void *memory_space_impl<BSIZE>::find_vulkan_buffer(mem_addr_t addr) const
+{
   mem_addr_t index = addr & ~(VULKAN_ADDR_BLK - 1);
   unsigned offset = addr & (VULKAN_ADDR_BLK - 1);
 
-  if (m_vulkan_address_map.find((void*)index) != m_vulkan_address_map.end()) {
-    void* vulkan_addr = m_vulkan_address_map.at((void*)index);
-    return (void*)((unsigned long long)vulkan_addr + offset);
+  if (m_vulkan_address_map.find((void *)index) != m_vulkan_address_map.end())
+  {
+    void *vulkan_addr = m_vulkan_address_map.at((void *)index);
+    return (void *)((unsigned long long)vulkan_addr + offset);
   }
-  else {
-    printf("Could not find %p in Vulkan address map\n", (void*)index);
+  else
+  {
+    printf("Could not find %p in Vulkan address map\n", (void *)index);
     return NULL;
   }
 }
 
 template <unsigned BSIZE>
 void memory_space_impl<BSIZE>::read(mem_addr_t addr, size_t length,
-                                    void *data) const {
-  if(!use_external_launcher) {
-    void* vulkan_addr = find_vulkan_buffer(addr);
+                                    void *data) const
+{
+  if (!use_external_launcher)
+  {
+    void *vulkan_addr = find_vulkan_buffer(addr);
 
-    if (vulkan_addr) {
+    if (vulkan_addr)
+    {
       memcpy(data, vulkan_addr, length);
     }
-    else {
+    else
+    {
       printf("gpgpusim: WARNING: Memory backing buffer not found for address %p. This data read may be invalid\n", addr);
       memcpy(data, addr, length);
     }
   }
-  else {
+  else
+  {
     mem_addr_t index = addr >> m_log2_block_size;
-    if ((addr + length) <= (index + 1) * BSIZE) {
+    if ((addr + length) <= (index + 1) * BSIZE)
+    {
       // fast route for intra-block access
       read_single_block(index, addr, length, data);
-    } else {
+    }
+    else
+    {
       // slow route for inter-block access
       unsigned nbytes_remain = length;
       unsigned dst_offset = 0;
       mem_addr_t current_addr = addr;
 
-      while (nbytes_remain > 0) {
+      while (nbytes_remain > 0)
+      {
         unsigned offset = current_addr & (BSIZE - 1);
         mem_addr_t page = current_addr >> m_log2_block_size;
         mem_addr_t access_limit = offset + nbytes_remain;
-        if (access_limit > BSIZE) {
+        if (access_limit > BSIZE)
+        {
           access_limit = BSIZE;
         }
 
@@ -207,25 +241,30 @@ void memory_space_impl<BSIZE>::read(mem_addr_t addr, size_t length,
 }
 
 template <unsigned BSIZE>
-void memory_space_impl<BSIZE>::print(const char *format, FILE *fout) const {
+void memory_space_impl<BSIZE>::print(const char *format, FILE *fout) const
+{
   typename map_t::const_iterator i_page;
 
-  for (i_page = m_data.begin(); i_page != m_data.end(); ++i_page) {
+  for (i_page = m_data.begin(); i_page != m_data.end(); ++i_page)
+  {
     fprintf(fout, "%s %08x:", m_name.c_str(), i_page->first);
     i_page->second.print(format, fout);
   }
 }
 
 template <unsigned BSIZE>
-void memory_space_impl<BSIZE>::set_watch(addr_t addr, unsigned watchpoint) {
+void memory_space_impl<BSIZE>::set_watch(addr_t addr, unsigned watchpoint)
+{
   m_watchpoints[watchpoint] = addr;
 }
 
 template <unsigned BSIZE>
-void memory_space_impl<BSIZE>::bind_vulkan_buffer(void* bufferAddr, unsigned bufferSize, void* devPtr) {
+void memory_space_impl<BSIZE>::bind_vulkan_buffer(void *bufferAddr, unsigned bufferSize, void *devPtr)
+{
   unsigned index = 0;
-  void* addr = bufferAddr;
-  while (addr < (bufferAddr + bufferSize)) {
+  void *addr = bufferAddr;
+  while (addr < (bufferAddr + bufferSize))
+  {
     m_vulkan_address_map[devPtr + index * VULKAN_ADDR_BLK] = addr;
     addr += VULKAN_ADDR_BLK;
     index++;
@@ -238,47 +277,57 @@ template class memory_space_impl<8192>;
 template class memory_space_impl<16 * 1024>;
 
 void g_print_memory_space(memory_space *mem, const char *format = "%08x",
-                          FILE *fout = stdout) {
+                          FILE *fout = stdout)
+{
   mem->print(format, fout);
 }
 
 #ifdef UNIT_TEST
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
   int errors_found = 0;
   memory_space *mem = new memory_space_impl<32>("test", 4);
   // write address to [address]
   for (mem_addr_t addr = 0; addr < 16 * 1024; addr += 4)
     mem->write(addr, 4, &addr, NULL, NULL);
 
-  for (mem_addr_t addr = 0; addr < 16 * 1024; addr += 4) {
+  for (mem_addr_t addr = 0; addr < 16 * 1024; addr += 4)
+  {
     unsigned tmp = 0;
     mem->read(addr, 4, &tmp);
-    if (tmp != addr) {
+    if (tmp != addr)
+    {
       errors_found = 1;
       printf("ERROR ** mem[0x%x] = 0x%x, expected 0x%x\n", addr, tmp, addr);
     }
   }
 
-  for (mem_addr_t addr = 0; addr < 16 * 1024; addr += 1) {
+  for (mem_addr_t addr = 0; addr < 16 * 1024; addr += 1)
+  {
     unsigned char val = (addr + 128) % 256;
     mem->write(addr, 1, &val, NULL, NULL);
   }
 
-  for (mem_addr_t addr = 0; addr < 16 * 1024; addr += 1) {
+  for (mem_addr_t addr = 0; addr < 16 * 1024; addr += 1)
+  {
     unsigned tmp = 0;
     mem->read(addr, 1, &tmp);
     unsigned char val = (addr + 128) % 256;
-    if (tmp != val) {
+    if (tmp != val)
+    {
       errors_found = 1;
       printf("ERROR ** mem[0x%x] = 0x%x, expected 0x%x\n", addr, tmp,
              (unsigned)val);
     }
   }
 
-  if (errors_found) {
+  if (errors_found)
+  {
     printf("SUMMARY:  ERRORS FOUND\n");
-  } else {
+  }
+  else
+  {
     printf("SUMMARY: UNIT TEST PASSED\n");
   }
 }

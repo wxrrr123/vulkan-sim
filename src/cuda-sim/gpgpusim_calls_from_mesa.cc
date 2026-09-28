@@ -32,12 +32,12 @@
 #include "vulkan_ray_tracing.h"
 // #include "vulkan/anv_private.h"
 
-extern "C" void gpgpusim_setPipelineInfo(VkRayTracingPipelineCreateInfoKHR* pCreateInfos)
+extern "C" void gpgpusim_setPipelineInfo(VkRayTracingPipelineCreateInfoKHR *pCreateInfos)
 {
     VulkanRayTracing::setPipelineInfo(pCreateInfos);
 }
 
-extern "C" void gpgpusim_setGeometries(VkAccelerationStructureGeometryKHR* pGeometries, uint32_t geometryCount)
+extern "C" void gpgpusim_setGeometries(VkAccelerationStructureGeometryKHR *pGeometries, uint32_t geometryCount)
 {
     VulkanRayTracing::setGeometries(pGeometries, geometryCount);
 }
@@ -47,30 +47,30 @@ extern "C" void gpgpusim_addTreelets(VkAccelerationStructureKHR accelerationStru
     VulkanRayTracing::setAccelerationStructure(accelerationStructure);
 }
 
-extern "C" void gpgpusim_testTraversal(struct anv_bvh_node* root)
+extern "C" void gpgpusim_testTraversal(struct anv_bvh_node *root)
 {
-    //VulkanRayTracing::
+    // VulkanRayTracing::
 }
 
-extern "C" uint32_t gpgpusim_registerShader(char * shaderPath, uint32_t shader_type)
+extern "C" uint32_t gpgpusim_registerShader(char *shaderPath, uint32_t shader_type)
 {
     return VulkanRayTracing::registerShaders(shaderPath, gl_shader_stage(shader_type));
 }
 
 extern "C" void gpgpusim_vkCmdTraceRaysKHR(
-                      void *raygen_sbt,
-                      void *miss_sbt,
-                      void *hit_sbt,
-                      void *callable_sbt,
-                      bool is_indirect,
-                      uint32_t launch_width,
-                      uint32_t launch_height,
-                      uint32_t launch_depth,
-                      uint64_t launch_size_addr)
+    void *raygen_sbt,
+    void *miss_sbt,
+    void *hit_sbt,
+    void *callable_sbt,
+    bool is_indirect,
+    uint32_t launch_width,
+    uint32_t launch_height,
+    uint32_t launch_depth,
+    uint64_t launch_size_addr)
 {
     VulkanRayTracing::invoke_gpgpusim();
     VulkanRayTracing::vkCmdTraceRaysKHR(raygen_sbt, miss_sbt, hit_sbt, callable_sbt,
-            is_indirect, launch_width, launch_height, launch_depth, launch_size_addr);
+                                        is_indirect, launch_width, launch_height, launch_depth, launch_size_addr);
 }
 
 extern "C" void gpgpusim_setDescriptor(uint32_t setID, uint32_t descID, void *address, uint32_t size, VkDescriptorType type)
@@ -78,45 +78,43 @@ extern "C" void gpgpusim_setDescriptor(uint32_t setID, uint32_t descID, void *ad
     VulkanRayTracing::setDescriptor(setID, descID, address, size, type);
 }
 
-
 // CPP externs
 extern void gpgpusim_addTreelets_cpp(VkAccelerationStructureKHR accelerationStructure)
 {
     VulkanRayTracing::setAccelerationStructure(accelerationStructure);
 }
 
-extern "C" void gpgpusim_setDescriptorSet(struct DESCRIPTOR_SET_STRUCT *set)
+extern "C" void gpgpusim_setDescriptorSet(uint32_t setID, struct DESCRIPTOR_SET_STRUCT *set)
 {
-    VulkanRayTracing::setDescriptorSet(set);
+    VulkanRayTracing::iterateDescriptorSet(set);
+    VulkanRayTracing::setDescriptorSet(setID, set);
 }
 
-
-
 // CPP externs
-extern uint32_t gpgpusim_registerShader_cpp(char * shaderPath, uint32_t shader_type)
+extern uint32_t gpgpusim_registerShader_cpp(char *shaderPath, uint32_t shader_type)
 {
     return VulkanRayTracing::registerShaders(shaderPath, gl_shader_stage(shader_type));
 }
 
 extern void gpgpusim_vkCmdTraceRaysKHR_cpp(
-                      void *raygen_sbt,
-                      void *miss_sbt,
-                      void *hit_sbt,
-                      void *callable_sbt,
-                      bool is_indirect,
-                      uint32_t launch_width,
-                      uint32_t launch_height,
-                      uint32_t launch_depth,
-                      uint64_t launch_size_addr)
+    void *raygen_sbt,
+    void *miss_sbt,
+    void *hit_sbt,
+    void *callable_sbt,
+    bool is_indirect,
+    uint32_t launch_width,
+    uint32_t launch_height,
+    uint32_t launch_depth,
+    uint64_t launch_size_addr)
 {
     VulkanRayTracing::invoke_gpgpusim();
     VulkanRayTracing::vkCmdTraceRaysKHR(raygen_sbt, miss_sbt, hit_sbt, callable_sbt,
-            is_indirect, launch_width, launch_height, launch_depth, launch_size_addr);
+                                        is_indirect, launch_width, launch_height, launch_depth, launch_size_addr);
 }
 
 extern void gpgpusim_setDescriptorSet_cpp(void *set)
 {
-    VulkanRayTracing::setDescriptorSet((struct DESCRIPTOR_SET_STRUCT*) set);
+    VulkanRayTracing::setDescriptorSet(0, (struct DESCRIPTOR_SET_STRUCT *)set);
 }
 
 extern void gpgpusim_setDescriptorSetFromLauncher_cpp(void *address, void *deviceAddress, uint32_t setID, uint32_t descID)
@@ -124,27 +122,27 @@ extern void gpgpusim_setDescriptorSetFromLauncher_cpp(void *address, void *devic
     VulkanRayTracing::setDescriptorSetFromLauncher(address, deviceAddress, setID, descID);
 }
 
-extern void gpgpusim_setStorageImageFromLauncher_cpp(void *address, 
-                                                    void *deviceAddress, 
-                                                    uint32_t setID, 
-                                                    uint32_t descID, 
-                                                    uint32_t width,
-                                                    uint32_t height,
-                                                    VkFormat format,
-                                                    uint32_t VkDescriptorTypeNum,
-                                                    uint32_t n_planes,
-                                                    uint32_t n_samples,
-                                                    VkImageTiling tiling,
-                                                    uint32_t isl_tiling_mode, 
-                                                    uint32_t row_pitch_B)
+extern void gpgpusim_setStorageImageFromLauncher_cpp(void *address,
+                                                     void *deviceAddress,
+                                                     uint32_t setID,
+                                                     uint32_t descID,
+                                                     uint32_t width,
+                                                     uint32_t height,
+                                                     VkFormat format,
+                                                     uint32_t VkDescriptorTypeNum,
+                                                     uint32_t n_planes,
+                                                     uint32_t n_samples,
+                                                     VkImageTiling tiling,
+                                                     uint32_t isl_tiling_mode,
+                                                     uint32_t row_pitch_B)
 {
     VulkanRayTracing::setStorageImageFromLauncher(address, deviceAddress, setID, descID, width, height, format, VkDescriptorTypeNum, n_planes, n_samples, tiling, isl_tiling_mode, row_pitch_B);
 }
 
-extern void gpgpusim_setTextureFromLauncher_cpp(void *address, 
-                                                void *deviceAddress, 
-                                                uint32_t setID, 
-                                                uint32_t descID, 
+extern void gpgpusim_setTextureFromLauncher_cpp(void *address,
+                                                void *deviceAddress,
+                                                uint32_t setID,
+                                                uint32_t descID,
                                                 uint64_t size,
                                                 uint32_t width,
                                                 uint32_t height,
@@ -157,7 +155,7 @@ extern void gpgpusim_setTextureFromLauncher_cpp(void *address,
                                                 uint32_t row_pitch_B,
                                                 uint32_t filter)
 {
-    VulkanRayTracing::setTextureFromLauncher(address, deviceAddress, setID, descID, size,width, height, format, VkDescriptorTypeNum, n_planes, n_samples, tiling, isl_tiling_mode, row_pitch_B, filter);
+    VulkanRayTracing::setTextureFromLauncher(address, deviceAddress, setID, descID, size, width, height, format, VkDescriptorTypeNum, n_planes, n_samples, tiling, isl_tiling_mode, row_pitch_B, filter);
 }
 
 extern "C" void gpgpusim_pass_child_addr(void *address)
@@ -165,17 +163,37 @@ extern "C" void gpgpusim_pass_child_addr(void *address)
     VulkanRayTracing::pass_child_addr(address);
 }
 
-extern "C" void gpgpusim_allocBLAS(void* rootAddr, uint64_t bufferSize, void* gpgpusimAddr)
+extern "C" void gpgpusim_allocBLAS(void *rootAddr, uint64_t bufferSize, void *gpgpusimAddr)
 {
     VulkanRayTracing::allocBLAS(rootAddr, bufferSize, gpgpusimAddr);
 }
 
-extern "C" void gpgpusim_allocTLAS(void* rootAddr, uint64_t bufferSize, void* gpgpusimAddr)
+extern "C" void gpgpusim_allocTLAS(void *rootAddr, uint64_t bufferSize, void *gpgpusimAddr)
 {
     VulkanRayTracing::allocTLAS(rootAddr, bufferSize, gpgpusimAddr);
 }
 
-extern "C" void* gpgpusim_allocBuffer(void* bufferAddr, uint64_t bufferSize)
+extern "C" void gpgpusim_registerBLASTriangles(void *blas_addr, const float *tris, uint32_t tri_count)
+{
+    VulkanRayTracing::registerBLASTriangles(blas_addr, tris, tri_count);
+}
+
+extern "C" void gpgpusim_registerTLASInstances(void *instances, uint32_t count)
+{
+    VulkanRayTracing::registerTLASInstances(instances, count);
+}
+
+extern "C" void gpgpusim_registerBufferDeviceAddress(void *addr, uint64_t size)
+{
+    VulkanRayTracing::registerBufferDeviceAddress(addr, size);
+}
+
+extern "C" void gpgpusim_setPushConstants(const void *data, uint32_t offset, uint32_t size)
+{
+    VulkanRayTracing::setPushConstants(data, offset, size);
+}
+
+extern "C" void *gpgpusim_allocBuffer(void *bufferAddr, uint64_t bufferSize)
 {
     return VulkanRayTracing::allocBuffer(bufferAddr, bufferSize);
 }

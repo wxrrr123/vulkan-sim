@@ -1,6 +1,5 @@
-// Copyright (c) 2022, Mohammadreza Saed, Yuan Hsi Chou, Lufei Liu, Tor M. Aamodt,
-// The University of British Columbia
-// All rights reserved.
+// Copyright (c) 2022, Mohammadreza Saed, Yuan Hsi Chou, Lufei Liu, Tor M.
+// Aamodt, The University of British Columbia All rights reserved.
 
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
@@ -31,30 +30,30 @@
 
 #include "vulkan/vulkan.h"
 #if defined(MESA_USE_INTEL_DRIVER)
-#include "vulkan/vulkan_intel.h"
 #include "vulkan/anv_acceleration_structure.h"
+#include "vulkan/vulkan_intel.h"
 
 #elif defined(MESA_USE_LVPIPE_DRIVER)
 #include "lvp_acceleration_structure.h"
 #endif
 
-#include "intersection_table.h"
 #include "compiler/spirv/spirv.h"
+#include "intersection_table.h"
 
 // #include "ptx_ir.h"
-#include "ptx_ir.h"
+#include <cmath>
+#include <fstream>
 #include "../../libcuda/gpgpu_context.h"
 #include "../abstract_hardware_model.h"
 #include "compiler/shader_enums.h"
-#include <fstream>
-#include <cmath>
+#include "ptx_ir.h"
 
-#define MAX(a,b) (((a)>(b))?(a):(b))
-#define MIN(a,b) (((a)<(b))?(a):(b))
-#define MIN_MAX(a,b,c) MAX(MIN((a), (b)), (c))
-#define MAX_MIN(a,b,c) MIN(MAX((a), (b)), (c))
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define MIN_MAX(a, b, c) MAX(MIN((a), (b)), (c))
+#define MAX_MIN(a, b, c) MIN(MAX((a), (b)), (c))
 
-#define MAX_DESCRIPTOR_SETS 1
+#define MAX_DESCRIPTOR_SETS 8
 #define MAX_DESCRIPTOR_SET_BINDINGS 32
 
 // enum class TransactionType {
@@ -68,9 +67,8 @@
 // };
 
 // typedef struct MemoryTransactionRecord {
-//     MemoryTransactionRecord(void* address, uint32_t size, TransactionType type)
-//     : address(address), size(size), type(type) {}
-//     void* address;
+//     MemoryTransactionRecord(void* address, uint32_t size, TransactionType
+//     type) : address(address), size(size), type(type) {} void* address;
 //     uint32_t size;
 //     TransactionType type;
 // } MemoryTransactionRecord;
@@ -84,29 +82,28 @@
 // };
 
 // typedef struct MemoryStoreTransactionRecord {
-//     MemoryStoreTransactionRecord(void* address, uint32_t size, StoreTransactionType type)
-//     : address(address), size(size), type(type) {}
+//     MemoryStoreTransactionRecord(void* address, uint32_t size,
+//     StoreTransactionType type) : address(address), size(size), type(type) {}
 //     void* address;
 //     uint32_t size;
 //     StoreTransactionType type;
 // } MemoryStoreTransactionRecord;
 
-
-
 extern bool use_external_launcher;
 
-typedef struct float4x4 {
-  float m[4][4];
+typedef struct float4x4
+{
+    float m[4][4];
 
-  float4 operator*(const float4& _vec) const
-  {
-    float vec[] = {_vec.x, _vec.y, _vec.z, _vec.w};
-    float res[] = {0, 0, 0, 0};
-    for(int i = 0; i < 4; i++)
-        for(int j = 0; j < 4; j++)
-            res[i] += this->m[j][i] * vec[j];
-    return {res[0], res[1], res[2], res[3]};
-  }
+    float4 operator*(const float4 &_vec) const
+    {
+        float vec[] = {_vec.x, _vec.y, _vec.z, _vec.w};
+        float res[] = {0, 0, 0, 0};
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++)
+                res[i] += this->m[j][i] * vec[j];
+        return {res[0], res[1], res[2], res[3]};
+    }
 } float4x4;
 
 typedef struct RayDebugGPUData
@@ -121,7 +118,7 @@ typedef struct RayDebugGPUData
     float3 v2pos;
     float3 attribs;
     float3 P_object;
-    float3 P; //world intersection point
+    float3 P; // world intersection point
     float3 N_object;
     float3 N;
     float NdotL;
@@ -138,7 +135,6 @@ typedef struct RayDebugGPUData
 //     return {res[0], res[1], res[2], res[3]};
 // }
 
-
 typedef struct Descriptor
 {
     uint32_t setID;
@@ -148,16 +144,17 @@ typedef struct Descriptor
     VkDescriptorType type;
 } Descriptor;
 
-typedef struct shader_stage_info {
+typedef struct shader_stage_info
+{
     uint32_t ID;
     gl_shader_stage type;
-    char* function_name;
+    char *function_name;
 } shader_stage_info;
 
-
-typedef struct Pixel{
+typedef struct Pixel
+{
     Pixel(float c0, float c1, float c2, float c3)
-    : c0(c0), c1(c1), c2(c2), c3(c3) {}
+        : c0(c0), c1(c1), c2(c2), c3(c3) {}
     Pixel() {}
 
     union
@@ -196,7 +193,7 @@ typedef struct storage_image_metadata
     uint32_t n_planes;
     uint32_t n_samples;
     VkImageTiling tiling;
-    uint32_t isl_tiling_mode; 
+    uint32_t isl_tiling_mode;
     uint32_t row_pitch_B;
 } storage_image_metadata;
 
@@ -219,7 +216,6 @@ typedef struct texture_metadata
     VkFilter filter;
 } texture_metadata;
 
-
 #if defined(MESA_USE_INTEL_DRIVER)
 #define DESCRIPTOR_SET_STRUCT anv_descriptor_set
 #define DESCRIPTOR_STRUCT anv_descriptor
@@ -239,136 +235,215 @@ struct lvp_descriptor;
 
 #endif
 
-#define VSIM_DPRINTF(...) \
-   if(VSIM_DEBUG_PRINT) { \
-      printf(__VA_ARGS__); \
-      fflush(stdout); \
-   }
+#define VSIM_DPRINTF(...)    \
+    if (VSIM_DEBUG_PRINT)    \
+    {                        \
+        printf(__VA_ARGS__); \
+        fflush(stdout);      \
+    }
+
+#include "bvh/bvh.hpp"
+#include <stack>
+#include <vector>
+#include <utility>
+
+typedef bvh::Bvh<float> bvh_t;
+typedef bvh_t::Trig trig_t;
+typedef bvh_t::Node node_t;
+
+template <typename T>
+const T &robust_min(const T &x, const T &y)
+{
+    return x < y ? x : y;
+}
+
+template <typename T>
+const T &robust_max(const T &x, const T &y)
+{
+    return x > y ? x : y;
+}
 
 class VulkanRayTracing
 {
 private:
-    static VkRayTracingPipelineCreateInfoKHR* pCreateInfos;
-    static VkAccelerationStructureGeometryKHR* pGeometries;
+    static VkRayTracingPipelineCreateInfoKHR *pCreateInfos;
+    static VkAccelerationStructureGeometryKHR *pGeometries;
     static uint32_t geometryCount;
     static VkAccelerationStructureKHR topLevelAS;
-    static std::vector<std::vector<Descriptor> > descriptors;
+    static std::vector<std::vector<Descriptor>> descriptors;
     static std::ofstream imageFile;
     static bool firstTime;
     static struct DESCRIPTOR_SET_STRUCT *descriptorSet;
+    // Per-set descriptor storage. vulkan-sim originally assumed a single descriptor set
+    // (RayTracingInVulkan only used set 0), but Lumen binds multiple sets (set 0 = resources,
+    // set 1 = acceleration structure), so getDescriptorAddress must select by setID.
+    static struct DESCRIPTOR_SET_STRUCT *descriptorSets[MAX_DESCRIPTOR_SETS];
 
     // For Launcher
-    static void* launcher_descriptorSets[MAX_DESCRIPTOR_SETS][MAX_DESCRIPTOR_SET_BINDINGS];
-    static void* launcher_deviceDescriptorSets[MAX_DESCRIPTOR_SETS][MAX_DESCRIPTOR_SET_BINDINGS];
-    static std::vector<void*> child_addrs_from_driver;
-    static std::map<void*, void*> VulkanRayTracing::blas_addr_map;
-    static void* tlas_addr;
+    static void *launcher_descriptorSets[MAX_DESCRIPTOR_SETS]
+                                        [MAX_DESCRIPTOR_SET_BINDINGS];
+    static void *launcher_deviceDescriptorSets[MAX_DESCRIPTOR_SETS]
+                                              [MAX_DESCRIPTOR_SET_BINDINGS];
+    static std::vector<void *> child_addrs_from_driver;
+    static std::map<void *, void *> VulkanRayTracing::blas_addr_map;
+
+    static void *tlas_addr;
+
+    static void *bvh_trigs_addr;
+    static void *bvh_nodes_addr;
+    static void *bvh_primitive_indices_addr;
+    static bvh_t bvh;
+
     static bool dumped;
     static bool _init_;
+
 public:
     // static RayDebugGPUData rayDebugGPUData[2000][2000];
-    static warp_intersection_table*** intersection_table;
-    static warp_intersection_table*** anyhit_table;
+    static warp_intersection_table ***intersection_table;
+    static warp_intersection_table ***anyhit_table;
     static IntersectionTableType intersectionTableType;
 
 private:
-    static bool mt_ray_triangle_test(float3 p0, float3 p1, float3 p2, Ray ray_properties, float* thit);
+    static bool mt_ray_triangle_test(float3 p0, float3 p1, float3 p2,
+                                     Ray ray_properties, float *thit);
     static float3 Barycentric(float3 p, float3 a, float3 b, float3 c);
     static std::vector<shader_stage_info> shaders;
 
     static void init(uint32_t launch_width, uint32_t launch_height);
 
-
 public:
+    static std::pair<bool, float> intersect_trig(trig_t *trigs, const Ray &ray);
+
     static void traceRay( // called by raygen shader
-                       VkAccelerationStructureKHR _topLevelAS,
-    				   uint rayFlags,
-                       uint cullMask,
-                       uint sbtRecordOffset,
-                       uint sbtRecordStride,
-                       uint missIndex,
-                       float3 origin,
-                       float Tmin,
-                       float3 direction,
-                       float Tmax,
-                       int payload,
-                       const ptx_instruction *pI,
-                       ptx_thread_info *thread);
+        VkAccelerationStructureKHR _topLevelAS, uint rayFlags, uint cullMask,
+        uint sbtRecordOffset, uint sbtRecordStride, uint missIndex, float3 origin,
+        float Tmin, float3 direction, float Tmax, int payload,
+        const ptx_instruction *pI, ptx_thread_info *thread);
+
     static void endTraceRay(const ptx_instruction *pI, ptx_thread_info *thread);
-    
-    static void load_descriptor(const ptx_instruction *pI, ptx_thread_info *thread);
 
-    static void setPipelineInfo(VkRayTracingPipelineCreateInfoKHR* pCreateInfos);
-    static void setGeometries(VkAccelerationStructureGeometryKHR* pGeometries, uint32_t geometryCount);
-    static void setAccelerationStructure(VkAccelerationStructureKHR accelerationStructure);
-    static void setDescriptorSet(struct DESCRIPTOR_SET_STRUCT *set);
+    static void load_descriptor(const ptx_instruction *pI,
+                                ptx_thread_info *thread);
+
+    static void setPipelineInfo(VkRayTracingPipelineCreateInfoKHR *pCreateInfos);
+    static void setGeometries(VkAccelerationStructureGeometryKHR *pGeometries,
+                              uint32_t geometryCount);
+    static void setAccelerationStructure(
+        VkAccelerationStructureKHR accelerationStructure);
+    static void setDescriptorSet(uint32_t setID, struct DESCRIPTOR_SET_STRUCT *set);
+
+    static void iterateDescriptorSet(struct DESCRIPTOR_SET_STRUCT *set);
+
+    // Builds bvh (the flat node_t BVH normally supplied by the app at
+    // descriptor bindings 12/13/14) for apps that bind a standard TLAS
+    // instead (e.g. Lumen). This mesa build never packs a walkable
+    // GEN_RT_BVH into the app AS buffers, so geometry is captured at
+    // vkCmdBuildAccelerationStructures time via the two register* hooks
+    // below (per-BLAS object-space triangles + per-TLAS instances) and
+    // combined here into one world-space flat BVH.
+    static void buildFallbackBVH(void *as_root);
+    // tris: tri_count triangles, 9 floats each (3 verts * xyz), object space.
+    static void registerBLASTriangles(void *blas_addr, const float *tris,
+                                      uint32_t tri_count);
+    // instances: `count` contiguous VkAccelerationStructureInstanceKHR
+    // (64 bytes each: 3x4 row-major transform, then customIndex/mask,
+    // sbtOffset/flags, then 8-byte BLAS reference).
+    static void registerTLASInstances(void *instances, uint32_t count);
+    // Buffers whose device address was handed to the app via
+    // vkGetBufferDeviceAddress. On lavapipe that address IS the host pointer,
+    // so the shader-visible address equals the backing memory; entries are
+    // identity-mapped into the vulkan address map at trace time so
+    // buffer-reference loads/stores hit registered backing instead of the
+    // "backing buffer not found" raw-pointer fallback.
+    static void registerBufferDeviceAddress(void *addr, uint64_t size);
+    // vkCmdPushConstants capture; rt_alloc_mem copies this into every
+    // thread's freshly allocated push_const variable (there is no other
+    // path by which push-constant data reaches simulated shaders).
+    static void setPushConstants(const void *data, uint32_t offset,
+                                 uint32_t size);
+    static const uint8_t *getPushConstants(uint32_t *size_out);
+
     static void invoke_gpgpusim();
-    static uint32_t registerShaders(char * shaderPath, gl_shader_stage shaderType);
+    static uint32_t registerShaders(char *shaderPath, gl_shader_stage shaderType);
+
     static void vkCmdTraceRaysKHR( // called by vulkan application
-                      void *raygen_sbt,
-                      void *miss_sbt,
-                      void *hit_sbt,
-                      void *callable_sbt,
-                      bool is_indirect,
-                      uint32_t launch_width,
-                      uint32_t launch_height,
-                      uint32_t launch_depth,
-                      uint64_t launch_size_addr);
-    static void callShader(const ptx_instruction *pI, ptx_thread_info *thread, function_info *target_func);
-    static void callMissShader(const ptx_instruction *pI, ptx_thread_info *thread);
-    static void callClosestHitShader(const ptx_instruction *pI, ptx_thread_info *thread);
-    static void callIntersectionShader(const ptx_instruction *pI, ptx_thread_info *thread, uint32_t shader_counter);
-    static void callAnyHitShader(const ptx_instruction *pI, ptx_thread_info *thread, uint32_t shader_counter);
-    static void setDescriptor(uint32_t setID, uint32_t descID, void *address, uint32_t size, VkDescriptorType type);
-    static void* getDescriptorAddress(uint32_t setID, uint32_t binding);
+        void *raygen_sbt, void *miss_sbt, void *hit_sbt, void *callable_sbt,
+        bool is_indirect, uint32_t launch_width, uint32_t launch_height,
+        uint32_t launch_depth, uint64_t launch_size_addr);
+    static void callShader(const ptx_instruction *pI, ptx_thread_info *thread,
+                           function_info *target_func);
+    static void callMissShader(const ptx_instruction *pI,
+                               ptx_thread_info *thread);
+    static void callClosestHitShader(const ptx_instruction *pI,
+                                     ptx_thread_info *thread);
+    static void callIntersectionShader(const ptx_instruction *pI,
+                                       ptx_thread_info *thread,
+                                       uint32_t shader_counter);
+    static void callAnyHitShader(const ptx_instruction *pI,
+                                 ptx_thread_info *thread,
+                                 uint32_t shader_counter);
+    static void setDescriptor(uint32_t setID, uint32_t descID, void *address,
+                              uint32_t size, VkDescriptorType type);
+    static void *getDescriptorAddress(uint32_t setID, uint32_t binding);
 
-    static void image_store(struct DESCRIPTOR_STRUCT* desc, uint32_t gl_LaunchIDEXT_X, uint32_t gl_LaunchIDEXT_Y, uint32_t gl_LaunchIDEXT_Z, uint32_t gl_LaunchsIDEXT_W, 
-              float hitValue_X, float hitValue_Y, float hitValue_Z, float hitValue_W, const ptx_instruction *pI, ptx_thread_info *thread);
-    static void getTexture(struct DESCRIPTOR_STRUCT *desc, float x, float y, float lod, float &c0, float &c1, float &c2, float &c3, std::vector<ImageMemoryTransactionRecord>& transactions, uint64_t launcher_offset = 0);
-    static void image_load(struct DESCRIPTOR_STRUCT *desc, uint32_t x, uint32_t y, float &c0, float &c1, float &c2, float &c3);
+    static void image_store(struct DESCRIPTOR_STRUCT *desc,
+                            uint32_t gl_LaunchIDEXT_X, uint32_t gl_LaunchIDEXT_Y,
+                            uint32_t gl_LaunchIDEXT_Z, uint32_t gl_LaunchsIDEXT_W,
+                            float hitValue_X, float hitValue_Y, float hitValue_Z,
+                            float hitValue_W, const ptx_instruction *pI,
+                            ptx_thread_info *thread);
+    static void getTexture(
+        struct DESCRIPTOR_STRUCT *desc, float x, float y, float lod, float &c0,
+        float &c1, float &c2, float &c3,
+        std::vector<ImageMemoryTransactionRecord> &transactions,
+        uint64_t launcher_offset = 0);
+    static void image_load(struct DESCRIPTOR_STRUCT *desc, uint32_t x, uint32_t y,
+                           float &c0, float &c1, float &c2, float &c3);
 
-    static void dump_descriptor_set(uint32_t setID, uint32_t descID, void *address, uint32_t size, VkDescriptorType type);
-    static void dump_descriptor_set_for_AS(uint32_t setID, uint32_t descID, void *address, uint32_t desc_size, VkDescriptorType type, uint32_t backwards_range, uint32_t forward_range, bool split_files, VkAccelerationStructureKHR _topLevelAS);
+    static void dump_descriptor_set(uint32_t setID, uint32_t descID,
+                                    void *address, uint32_t size,
+                                    VkDescriptorType type);
+    static void dump_descriptor_set_for_AS(
+        uint32_t setID, uint32_t descID, void *address, uint32_t desc_size,
+        VkDescriptorType type, uint32_t backwards_range, uint32_t forward_range,
+        bool split_files, VkAccelerationStructureKHR _topLevelAS);
     static void dump_descriptor_sets(struct DESCRIPTOR_SET_STRUCT *set);
-    static void dump_AS(struct DESCRIPTOR_SET_STRUCT *set, VkAccelerationStructureKHR _topLevelAS);
-    static void dump_callparams_and_sbt(void *raygen_sbt, void *miss_sbt, void *hit_sbt, void *callable_sbt, bool is_indirect, uint32_t launch_width, uint32_t launch_height, uint32_t launch_depth, uint32_t launch_size_addr);
-    static void dumpTextures(struct DESCRIPTOR_STRUCT *desc, uint32_t setID, uint32_t binding, VkDescriptorType type);
-    static void dumpStorageImage(struct DESCRIPTOR_STRUCT *desc, uint32_t setID, uint32_t binding, VkDescriptorType type);
-    static void setDescriptorSetFromLauncher(void *address, void *deviceAddress, uint32_t setID, uint32_t descID);
-    static void setStorageImageFromLauncher(void *address, 
-                                            void *deviceAddress,
-                                            uint32_t setID, 
-                                            uint32_t descID, 
-                                            uint32_t width,
-                                            uint32_t height,
-                                            VkFormat format,
-                                            uint32_t VkDescriptorTypeNum,
-                                            uint32_t n_planes,
-                                            uint32_t n_samples,
-                                            VkImageTiling tiling,
-                                            uint32_t isl_tiling_mode, 
-                                            uint32_t row_pitch_B);
-    static void setTextureFromLauncher(void *address,
-                                       void *deviceAddress, 
-                                       uint32_t setID, 
-                                       uint32_t descID, 
-                                       uint64_t size,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       VkFormat format,
-                                       uint32_t VkDescriptorTypeNum,
-                                       uint32_t n_planes,
-                                       uint32_t n_samples,
-                                       VkImageTiling tiling,
-                                       uint32_t isl_tiling_mode,
-                                       uint32_t row_pitch_B,
-                                       uint32_t filter);
+    static void dump_AS(struct DESCRIPTOR_SET_STRUCT *set,
+                        VkAccelerationStructureKHR _topLevelAS);
+    static void dump_callparams_and_sbt(void *raygen_sbt, void *miss_sbt,
+                                        void *hit_sbt, void *callable_sbt,
+                                        bool is_indirect, uint32_t launch_width,
+                                        uint32_t launch_height,
+                                        uint32_t launch_depth,
+                                        uint32_t launch_size_addr);
+    static void dumpTextures(struct DESCRIPTOR_STRUCT *desc, uint32_t setID,
+                             uint32_t binding, VkDescriptorType type);
+    static void dumpStorageImage(struct DESCRIPTOR_STRUCT *desc, uint32_t setID,
+                                 uint32_t binding, VkDescriptorType type);
+    static void setDescriptorSetFromLauncher(void *address, void *deviceAddress,
+                                             uint32_t setID, uint32_t descID);
+    static void setStorageImageFromLauncher(
+        void *address, void *deviceAddress, uint32_t setID, uint32_t descID,
+        uint32_t width, uint32_t height, VkFormat format,
+        uint32_t VkDescriptorTypeNum, uint32_t n_planes, uint32_t n_samples,
+        VkImageTiling tiling, uint32_t isl_tiling_mode, uint32_t row_pitch_B);
+    static void setTextureFromLauncher(
+        void *address, void *deviceAddress, uint32_t setID, uint32_t descID,
+        uint64_t size, uint32_t width, uint32_t height, VkFormat format,
+        uint32_t VkDescriptorTypeNum, uint32_t n_planes, uint32_t n_samples,
+        VkImageTiling tiling, uint32_t isl_tiling_mode, uint32_t row_pitch_B,
+        uint32_t filter);
     static void pass_child_addr(void *address);
-    static void allocBLAS(void* rootAddr, uint64_t bufferSize, void* gpgpusimAddr);
-    static void allocTLAS(void* rootAddr, uint64_t bufferSize, void* gpgpusimAddr);
-    static void* allocBuffer(void* bufferAddr, uint64_t bufferSize);
-    static void findOffsetBounds(int64_t &max_backwards, int64_t &min_backwards, int64_t &min_forwards, int64_t &max_forwards, VkAccelerationStructureKHR _topLevelAS);
-    static void* gpgpusim_alloc(uint32_t size);
+
+    static void allocBLAS(void *rootAddr, uint64_t bufferSize,
+                          void *gpgpusimAddr);
+    static void allocTLAS(void *rootAddr, uint64_t bufferSize,
+                          void *gpgpusimAddr);
+    static void *allocBuffer(void *bufferAddr, uint64_t bufferSize);
+    static void findOffsetBounds(int64_t &max_backwards, int64_t &min_backwards,
+                                 int64_t &min_forwards, int64_t &max_forwards,
+                                 VkAccelerationStructureKHR _topLevelAS);
+    static void *gpgpusim_alloc(uint32_t size);
 };
 
 #endif /* VULKAN_RAY_TRACING_H */

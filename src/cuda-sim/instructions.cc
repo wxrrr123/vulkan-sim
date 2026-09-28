@@ -26,6 +26,9 @@
 // CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
+
+// clang-format off
+
 #include "instructions.h"
 #include "half.h"
 #include "half.hpp"
@@ -1161,6 +1164,8 @@ void bar_callback(const inst_t *inst, ptx_thread_info *thread) {
 void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
   const ptx_instruction *pI = dynamic_cast<const ptx_instruction *>(inst);
 
+
+
   // "Decode" the output type
   unsigned to_type = pI->get_type();
   size_t size;
@@ -1218,6 +1223,15 @@ void atom_callback(const inst_t *inst, ptx_thread_info *thread) {
   // Copy value pointed to in operand 'a' into register 'd'
   // (i.e. copy src1_data to dst)
   mem->read(effective_address, size / 8, &data.s64);
+  {
+    static int vsim_atom_dbg2 = 0;
+    if (vsim_atom_dbg2 < 24) {
+      printf("gpgpusim: ATOMRES #%d addr 0x%llx old %u\n", vsim_atom_dbg2,
+             (unsigned long long)effective_address, (unsigned)data.u32);
+      fflush(stdout);
+      vsim_atom_dbg2++;
+    }
+  }
   if (dst.get_symbol()->type()) {
     thread->set_operand_value(dst, data, to_type, thread,
                               pI);  // Write value into register 'd'
@@ -3413,6 +3427,17 @@ void ld_exec(const ptx_instruction *pI, ptx_thread_info *thread) {
   addr_t addr = src1_data.u64;
 
   decode_space(space, thread, src1, mem, addr);
+
+  /* Debug: near-null loads (BDA field 0 / unbound descriptor chases) */
+  if (addr < 0x10000) {
+    static int vsim_null_ld_warned = 0;
+    if (vsim_null_ld_warned < 10) {
+      printf("gpgpusim: NULLLOAD addr 0x%llx at %s:%u\n",
+             (unsigned long long)addr, pI->source_file(), pI->source_line());
+      fflush(stdout);
+      vsim_null_ld_warned++;
+    }
+  }
 
   size_t size;
   int t;
@@ -6790,6 +6815,14 @@ void load_ray_instance_custom_index_impl(const ptx_instruction *pI, ptx_thread_i
     }
   }
 
+  {
+    static int dbg_ici = 0;
+    if (dbg_ici < 12) {
+      printf("gpgpusim: ICI[%d] = %u (shader_counter=%d)\n", dbg_ici, instance_index, (int)shader_counter);
+      fflush(stdout);
+      dbg_ici++;
+    }
+  }
   assert(pI->get_num_operands() == 1);
   const operand_info &dst = pI->dst();
 
@@ -7415,6 +7448,20 @@ void image_deref_load_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   std::vector<ImageMemoryTransactionRecord> transactions;
   VulkanRayTracing::getTexture(desc, x, y, 0, c0, c1, c2, c3, transactions); // MRS_TODO: x and y are uint
 
+  /* Feed the timing model this lane's REAL effective address. Without this,
+   * generate_mem_accesses packs each lane's STALE last-effective-address
+   * (zero for lanes that never touched memory) into the access, producing
+   * malformed size/sector-mask fetches that assert in the sectored L2. */
+  if (!transactions.empty()) {
+    thread->set_txl_transactions(transactions[0]);
+  } else {
+    ImageMemoryTransactionRecord dummy;
+    dummy.type = ImageTransactionType::TEXTURE_LOAD;
+    dummy.address = desc; /* any mapped host address; image had no backing */
+    dummy.size = 4;
+    thread->set_txl_transactions(dummy);
+  }
+
   const operand_info &dst1 = pI->operand_lookup(1);
   const operand_info &dst2 = pI->operand_lookup(2);
   const operand_info &dst3 = pI->operand_lookup(3);
@@ -7483,6 +7530,17 @@ void rt_alloc_mem_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   } 
   else {
     address = thread->RT_thread_data->add_variable_decleration_entry(type, name, size);
+    if (type == nir_var_mem_push_const) {
+      // Fresh per-thread push-constant block: fill it with the app's
+      // vkCmdPushConstants data (nothing else ever writes it).
+      uint32_t pc_size = 0;
+      const uint8_t *pc = VulkanRayTracing::getPushConstants(&pc_size);
+      if (pc_size > size) pc_size = size;
+      if (pc_size > 0) {
+        memory_space *mem = thread->get_global_memory();
+        mem->write(address, pc_size, pc, thread, pI);
+      }
+    }
   }
 
   data.u64 = address;
