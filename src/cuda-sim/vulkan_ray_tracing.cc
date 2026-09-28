@@ -2503,6 +2503,19 @@ void VulkanRayTracing::getTexture(struct DESCRIPTOR_STRUCT *desc,
             c2 = fallback_half_to_float(h[2]); c3 = fallback_half_to_float(h[3]);
             break;
         }
+        // Hardware decodes *_SRGB formats to linear on sample (alpha stays
+        // linear); reading them as UNORM made textured albedo too bright/desaturated.
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+        {
+            auto srgb_to_linear = [](uint8_t v) {
+                float s = v / 255.0f;
+                return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
+            };
+            c0 = srgb_to_linear(px[0]); c1 = srgb_to_linear(px[1]);
+            c2 = srgb_to_linear(px[2]); c3 = px[3] / 255.0f;
+            break;
+        }
         default: // 8-bit unorm (RGBA8/BGRA8)
         {
             c0 = px[0] / 255.0f; c1 = px[1] / 255.0f;
