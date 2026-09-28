@@ -643,6 +643,7 @@ void ptx_instruction::set_fp_or_int_archop()
       (m_opcode == LOAD_RAY_INSTANCE_CUSTOM_INDEX_OP) || (m_opcode == END_TRACE_RAY_OP) ||
       (m_opcode == LOAD_RAY_WORLD_ORIGIN_OP) || (m_opcode == LOAD_RAY_T_MAX_OP) ||
       (m_opcode == TXL_OP) || (m_opcode == SHADER_CLOCK_OP) || (m_opcode == IMG_DEREF_LD_OP) ||
+      (m_opcode == REORDER_THREAD_NV_OP) ||
       (m_opcode == RUN_INTERSECTION_OP) || (m_opcode == GET_INTERSECTION_INDEX_OP) ||
       (m_opcode == RUN_ANYHIT_OP) || (m_opcode == GET_ANYHIT_INDEX_OP) ||
       (m_opcode == CALL_INTERSECTION_SHADER_OP) || (m_opcode == INTERSECTION_EXIT_OP) ||
@@ -695,6 +696,7 @@ void ptx_instruction::set_mul_div_or_other_archop()
       (m_opcode != LOAD_RAY_INSTANCE_CUSTOM_INDEX_OP) && (m_opcode != END_TRACE_RAY_OP) &&
       (m_opcode != LOAD_RAY_WORLD_ORIGIN_OP) && (m_opcode != LOAD_RAY_T_MAX_OP) &&
       (m_opcode != TXL_OP) && (m_opcode != SHADER_CLOCK_OP) && (m_opcode != IMG_DEREF_LD_OP) &&
+      (m_opcode != REORDER_THREAD_NV_OP) &&
       (m_opcode != RUN_INTERSECTION_OP) && (m_opcode != GET_INTERSECTION_INDEX_OP) &&
       (m_opcode != RUN_ANYHIT_OP) && (m_opcode != GET_ANYHIT_INDEX_OP) &&
       (m_opcode != CALL_INTERSECTION_SHADER_OP) && (m_opcode != INTERSECTION_EXIT_OP) &&
@@ -1489,6 +1491,9 @@ void ptx_instruction::set_input_output_registers()
     break;
   case SHADER_CLOCK_OP:
     operand_classification = {2, 2};
+    break;
+  case REORDER_THREAD_NV_OP:
+    operand_classification = {1, 1}; // hint, bits: both sources
     break;
   case COPYSIGNF_OP:
     operand_classification = {2, 1};

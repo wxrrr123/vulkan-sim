@@ -45,6 +45,7 @@ class ptx_recognizer;
 #include <string.h>
 #include <cmath>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include "../abstract_hardware_model.h"
@@ -7925,6 +7926,48 @@ void set_element_32_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     assert(0);
   
   thread->set_operand_value(dst, data, BB128_TYPE, thread, pI);
+}
+
+// OpReorderThreadWithHintNV. Reordering never changes results, so functionally
+// this is a no-op; the reorder itself belongs to the timing model.
+void reorder_thread_nv_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  const operand_info &hint_op = pI->operand_lookup(0);
+  const operand_info &bits_op = pI->operand_lookup(1);
+  uint32_t hint = thread->get_operand_value(hint_op, hint_op, U32_TYPE, thread, 1).u32;
+  uint32_t bits = thread->get_operand_value(bits_op, bits_op, U32_TYPE, thread, 1).u32;
+
+  // Debug sidecar: one file per kernel launch, record {exec count, hint, bits}
+  // per launch pixel (same x/y as load_ray_launch_id), to verify keys arrive intact.
+  static std::map<unsigned, FILE *> key_dumps;
+  static std::mutex key_dump_mutex;
+  std::lock_guard<std::mutex> lk(key_dump_mutex);
+  kernel_info_t &k = thread->get_kernel();
+  unsigned width = thread->get_nctaid().x * 32;
+  unsigned height = thread->get_nctaid().y;
+  FILE *&fd = key_dumps[k.get_uid()];
+  if (fd == NULL) {
+    char fname[256];
+    snprintf(fname, sizeof(fname), "reorder_keys_k%u_%s_%ux%u.u32", k.get_uid(),
+             k.name().c_str(), width, height);
+    fd = fopen(fname, "w+b");
+    printf("gpgpusim: reorder_thread_nv in kernel %u (%s) -> %s\n", k.get_uid(),
+           k.name().c_str(), fname);
+  }
+  if (fd != NULL) {
+    unsigned x = thread->get_tid().x + thread->get_ctaid().x * 32;
+    unsigned y = thread->get_ctaid().y;
+    off_t off = (off_t)(y * width + x) * 3 * sizeof(uint32_t);
+    uint32_t rec[3] = {0, 0, 0};
+    fseeko(fd, off, SEEK_SET);
+    if (fread(rec, sizeof(rec), 1, fd) != 1)
+      rec[0] = rec[1] = rec[2] = 0;
+    rec[0]++;
+    rec[1] = hint;
+    rec[2] = bits;
+    fseeko(fd, off, SEEK_SET);
+    fwrite(rec, sizeof(rec), 1, fd);
+    fflush(fd);
+  }
 }
 
 void shader_clock_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
