@@ -242,6 +242,7 @@ class shd_warp_t {
   void check_time_out();
 
   unsigned get_cta_id() const { return m_cta_id; }
+  const std::bitset<MAX_WARP_SIZE> &get_active_threads() const { return m_active_threads; }
 
   unsigned get_dynamic_warp_id() const { return m_dynamic_warp_id; }
   unsigned get_warp_id() const { return m_warp_id; }
@@ -1782,6 +1783,10 @@ class shader_core_config : public core_config {
   bool m_rt_use_l1d;
   bool m_rt_perfect_mem;
   bool m_rt_coherence_engine;
+  // Thread reorder unit for reorder_thread_nv: 0 = off (plain 1-cycle ALU op),
+  // 1 = collect/release only (no permutation), 2 = full sort by key.
+  unsigned m_rt_reorder_policy;
+  unsigned m_rt_reorder_timeout; // cycles after the first arrival before a forced release
   char * m_rt_coherence_engine_config_str;
   ray_coherence_config m_rt_coherence_engine_config;
   bool bypassL0Complet;
@@ -1873,6 +1878,17 @@ struct shader_core_stats_pod {
   unsigned gpgpu_n_cmem_portconflict;
   unsigned gpu_stall_shd_mem_breakdown[N_MEM_STAGE_ACCESS_TYPE][N_MEM_STAGE_STALL_TYPE];
   unsigned gpu_reg_bank_conflict_stalls;
+  // Thread reorder unit (cumulative over all SMs and kernels).
+  unsigned long long reorder_arrivals;         // warps issuing reorder_thread_nv
+  unsigned long long reorder_converged;        // ... that were converged -> joined the pool
+  unsigned long long reorder_skipped_diverged; // ... that were not -> passed through
+  unsigned long long reorder_live_lanes;       // live lanes summed over converged arrivals
+  unsigned long long reorder_events;           // pool releases
+  unsigned long long reorder_event_warps;      // warps summed over releases
+  unsigned long long reorder_timeouts;         // releases forced by the timeout
+  unsigned long long reorder_wait_cycles;      // arrival->release cycles summed over warps
+  unsigned long long reorder_excluded_mismatch;// waiting warps left out (different pc)
+  unsigned long long reorder_threads_moved;    // threads that changed slot
   unsigned *shader_cycle_distro;
   unsigned *last_shader_cycle_distro;
   std::map<unsigned/*sid*/,std::map<unsigned/*wid*/,std::map<unsigned/*# of entries*/,long long unsigned/*cycles*/> > >  st_size_distro;
@@ -2226,6 +2242,11 @@ class shader_core_ctx : public core_t {
 
   // accessors
   virtual bool warp_waiting_at_barrier(unsigned warp_id) const;
+  // Thread reorder unit (reorder_thread_nv), see shader.cc.
+  bool warp_waiting_at_reorder(unsigned warp_id) const;
+  void reorder_warp_arrives(unsigned warp_id, const active_mask_t &active_mask,
+                            address_type next_pc);
+  void reorder_cycle();
   void get_pdom_stack_top_info(unsigned tid, unsigned *pc, unsigned *rpc) const;
   float get_current_occupancy(unsigned long long &active,
                               unsigned long long &total) const;
@@ -2551,6 +2572,19 @@ class shader_core_ctx : public core_t {
   // decode/dispatch
   std::vector<shd_warp_t *> m_warp;  // per warp information array
   barrier_set_t m_barriers;
+  // Thread reorder unit state, one entry per warp slot.
+  enum reorder_state_t
+  {
+    REORDER_NOT_ARRIVED = 0,
+    REORDER_WAITING,
+    REORDER_PASSED
+  };
+  std::vector<reorder_state_t> m_reorder_state;
+  std::vector<unsigned long long> m_reorder_arrival_cycle;
+  std::vector<address_type> m_reorder_next_pc;
+  unsigned long long m_reorder_first_wait_cycle;
+  unsigned m_reorder_n_waiting;
+  void reorder_release(bool timed_out);
   ifetch_buffer_t m_inst_fetch_buffer;
   std::vector<register_set> m_pipeline_reg;
   Scoreboard *m_scoreboard;

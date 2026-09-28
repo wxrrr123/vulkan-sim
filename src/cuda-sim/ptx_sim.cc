@@ -55,6 +55,11 @@ void ptx_cta_info::add_thread(ptx_thread_info *thd) {
   m_threads_in_cta.insert(thd);
 }
 
+void ptx_cta_info::remove_thread(ptx_thread_info *thd) {
+  assert(m_threads_that_have_exited.find(thd) == m_threads_that_have_exited.end());
+  m_threads_in_cta.erase(thd);
+}
+
 unsigned ptx_cta_info::num_threads() const { return m_threads_in_cta.size(); }
 
 void ptx_cta_info::check_cta_thread_status_and_reset() {

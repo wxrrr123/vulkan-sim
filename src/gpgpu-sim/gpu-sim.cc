@@ -266,6 +266,16 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "enable coherency engine (ray sorting) ",
       "0");
   option_parser_register(
+      opp, "-gpgpu_rt_reorder_policy", OPT_UINT32, &m_rt_reorder_policy,
+      "reorder_thread_nv: 0=off (plain ALU op), 1=collect/release only, "
+      "2=full sort by key",
+      "0");
+  option_parser_register(
+      opp, "-gpgpu_rt_reorder_timeout", OPT_UINT32, &m_rt_reorder_timeout,
+      "cycles after the first arrival before the reorder pool is force-released "
+      "(0=never)",
+      "500000");
+  option_parser_register(
       opp, "-gpgpu_rt_coherence_engine_config", OPT_CSTR, &m_rt_coherence_engine_config_str,
       "max cycles, hash ",
       "100, d");

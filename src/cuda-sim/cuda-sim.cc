@@ -783,6 +783,8 @@ void ptx_instruction::set_opcode_and_latency() {
   op = ALU_OP;
   mem_op = NOT_TEX;
   initiation_interval = latency = 1;
+  // Stays an ALU op (same pipe/latency as step 1); the SM reorder unit keys off this flag.
+  is_reorder = (m_opcode == REORDER_THREAD_NV_OP);
   switch (m_opcode) {
     case TRACE_RAY_OP:
       op = RT_CORE_OP;
@@ -2208,6 +2210,42 @@ const warp_inst_t *gpgpu_context::ptx_fetch_inst(address_type pc) {
   return pc_to_instruction(pc);
 }
 
+// Per-hardware-slot functional state, reused as CTAs come and go. File scope
+// (was function-static in ptx_sim_init_thread) so the reorder unit can keep it
+// consistent when it moves threads between slots.
+static std::map<unsigned, memory_space *> shared_memory_lookup;
+static std::map<unsigned, memory_space *> sstarr_memory_lookup;
+static std::map<unsigned, ptx_cta_info *> ptx_cta_lookup;
+static std::map<unsigned, ptx_warp_info *> ptx_warp_lookup;
+static std::map<unsigned, std::map<unsigned, memory_space *>>
+    local_memory_lookup;
+
+void ptx_sim_move_thread_to_slot(ptx_thread_info *thd, int sid,
+                                 unsigned hw_cta_id, unsigned hw_warp_id,
+                                 unsigned hw_tid)
+{
+  thd->set_hw_slot(hw_cta_id, hw_warp_id, hw_tid);
+  thd->m_warp_info = ptx_warp_lookup.at(hw_warp_id);
+
+  // CTA membership follows the slot: the CTA-reallocation check requires every
+  // thread registered with a hardware CTA to have exited when that CTA's slots do.
+  unsigned sm_idx =
+      hw_cta_id * thd->get_gpu()->gpgpu_ctx->func_sim->gpgpu_param_num_shaders + sid;
+  ptx_cta_info *cta_info = ptx_cta_lookup.at(sm_idx);
+  if (thd->m_cta_info != cta_info)
+  {
+    thd->m_cta_info->remove_thread(thd);
+    cta_info->add_thread(thd);
+    thd->m_cta_info = cta_info;
+  }
+
+  // Local memory stays with the thread; the slot now maps to it, so a thread
+  // later initialised in the old slot cannot share it.
+  local_memory_lookup[sid][hw_tid] = thd->m_local_mem;
+  // Shared/sstarr memory pointers are left as they are (per-CTA; raygen shaders
+  // do not use shared memory, and every CTA of a kernel holds the same params).
+}
+
 unsigned ptx_sim_init_thread(kernel_info_t &kernel,
                              ptx_thread_info **thread_info, int sid,
                              unsigned tid, unsigned threads_left,
@@ -2215,13 +2253,6 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
                              unsigned hw_cta_id, unsigned hw_warp_id,
                              gpgpu_t *gpu, bool isInFunctionalSimulationMode) {
   std::list<ptx_thread_info *> &active_threads = kernel.active_threads();
-
-  static std::map<unsigned, memory_space *> shared_memory_lookup;
-  static std::map<unsigned, memory_space *> sstarr_memory_lookup;
-  static std::map<unsigned, ptx_cta_info *> ptx_cta_lookup;
-  static std::map<unsigned, ptx_warp_info *> ptx_warp_lookup;
-  static std::map<unsigned, std::map<unsigned, memory_space *> >
-      local_memory_lookup;
 
   if (*thread_info != NULL) {
     ptx_thread_info *thd = *thread_info;

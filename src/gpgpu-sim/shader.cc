@@ -31,6 +31,7 @@
 #include <float.h>
 #include <limits.h>
 #include <string.h>
+#include <algorithm>
 #include "../../libcuda/gpgpu_context.h"
 #include "../cuda-sim/cuda-sim.h"
 #include "../cuda-sim/ptx-stats.h"
@@ -79,6 +80,11 @@ void exec_shader_core_ctx::create_shd_warp() {
   for (unsigned k = 0; k < m_config->max_warps_per_shader; ++k) {
     m_warp[k] = new shd_warp_t(this, m_config->warp_size);
   }
+  m_reorder_state.assign(m_config->max_warps_per_shader, REORDER_NOT_ARRIVED);
+  m_reorder_arrival_cycle.assign(m_config->max_warps_per_shader, 0);
+  m_reorder_next_pc.assign(m_config->max_warps_per_shader, (address_type)-1);
+  m_reorder_first_wait_cycle = 0;
+  m_reorder_n_waiting = 0;
 }
 
 void shader_core_ctx::create_front_pipeline() {
@@ -562,6 +568,7 @@ void shader_core_ctx::init_warps(unsigned cta_id, unsigned start_thread,
     }
 
     m_warp[i]->init(start_pc, cta_id, i, active_threads, m_dynamic_warp_id);
+    m_reorder_state[i] = REORDER_NOT_ARRIVED;
     ++m_dynamic_warp_id;
     m_not_completed += n_active;
     ++m_active_warps;
@@ -825,6 +832,14 @@ void shader_core_stats::print(FILE *fout) const {
   for (unsigned i = 3; i < m_config->warp_size + 3; i++)
     fprintf(fout, "\tW%d:%d", i - 2, shader_cycle_distro[i]);
   fprintf(fout, "\n");
+  fprintf(fout,
+          "Reorder: arrivals=%llu converged=%llu skipped_diverged=%llu "
+          "live_lanes=%llu events=%llu event_warps=%llu timeouts=%llu "
+          "wait_cycles=%llu excluded_mismatch=%llu threads_moved=%llu\n",
+          reorder_arrivals, reorder_converged, reorder_skipped_diverged,
+          reorder_live_lanes, reorder_events, reorder_event_warps,
+          reorder_timeouts, reorder_wait_cycles, reorder_excluded_mismatch,
+          reorder_threads_moved);
   fprintf(fout, "single_issue_nums: ");
   for (unsigned i = 0; i < m_config->gpgpu_num_sched_per_core; i++)
     fprintf(fout, "WS%d:%d\t", i, single_issue_nums[i]);
@@ -1322,6 +1337,9 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   } else if (next_inst->op == MEMORY_BARRIER_OP) {
     m_warp[warp_id]->set_membar();
   }
+
+  if (next_inst->is_reorder && m_config->m_rt_reorder_policy > 0)
+    reorder_warp_arrives(warp_id, active_mask, next_inst->pc + next_inst->isize);
 
   updateSIMTDivergenceStructures(warp_id, *pipe_reg);
   if(m_gpu->simd_model() == AWARE_RECONVERGENCE) {
@@ -4831,6 +4849,8 @@ void shader_core_ctx::cycle() {
   writeback();
   execute();
   read_operands();
+  if (m_config->m_rt_reorder_policy > 0)
+    reorder_cycle();
   issue();
   for (int i = 0; i < m_config->inst_fetch_throughput; ++i) {
     decode();
@@ -5209,6 +5229,150 @@ void shader_core_ctx::decrement_atomic_count(unsigned wid, unsigned n) {
   m_warp[wid]->dec_n_atomic(n);
 }
 
+/* Thread reorder unit (reorder_thread_nv, i.e. SER's reorderThread).
+ *
+ * A warp that issues the instruction joins the SM's pool if it is converged
+ * (every live lane is in the instruction's mask) and parks there; a diverged
+ * warp passes straight through (counted, not reordered). The pool is released
+ * once no warp on the SM is still expected: a warp is expected until it
+ * arrives, and never if it has finished or already passed the reorder point.
+ * A timeout forces a release; every timeout is counted.
+ *
+ * Release moves thread contexts only among the live slots of the pooled warps
+ * (policy 2 = stable sort by key), so each slot's CTA and each warp's live mask
+ * and SIMT stack are unchanged. No reorder cost is modelled yet beyond the
+ * waiting itself. */
+bool shader_core_ctx::warp_waiting_at_reorder(unsigned warp_id) const
+{
+  return m_config->m_rt_reorder_policy > 0 &&
+         m_reorder_state[warp_id] == REORDER_WAITING;
+}
+
+void shader_core_ctx::reorder_warp_arrives(unsigned warp_id,
+                                           const active_mask_t &active_mask,
+                                           address_type next_pc)
+{
+  m_stats->reorder_arrivals++;
+  if (active_mask != m_warp[warp_id]->get_active_threads())
+  {
+    m_stats->reorder_skipped_diverged++;
+    m_reorder_state[warp_id] = REORDER_PASSED;
+    return;
+  }
+  unsigned long long now = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
+  m_stats->reorder_converged++;
+  m_stats->reorder_live_lanes += active_mask.count();
+  if (m_reorder_n_waiting == 0)
+    m_reorder_first_wait_cycle = now;
+  m_reorder_n_waiting++;
+  m_reorder_state[warp_id] = REORDER_WAITING;
+  m_reorder_arrival_cycle[warp_id] = now;
+  m_reorder_next_pc[warp_id] = next_pc;
+}
+
+void shader_core_ctx::reorder_cycle()
+{
+  if (m_reorder_n_waiting == 0)
+    return;
+  unsigned long long now = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
+  bool timed_out = m_config->m_rt_reorder_timeout > 0 &&
+                   now - m_reorder_first_wait_cycle >= m_config->m_rt_reorder_timeout;
+  unsigned expected = 0;
+  for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
+  {
+    if (m_reorder_state[w] == REORDER_WAITING)
+    {
+      // Drained first, so no in-flight result belongs to a thread that moves.
+      // Only issued instructions count: the next one is already decoded into
+      // the (parked) warp's ibuffer and cannot drain until release.
+      if (m_warp[w]->num_issued_inst_in_pipeline() > 0 ||
+          !m_warp[w]->stores_done() || m_scoreboard->pendingWrites(w))
+      {
+        static bool warned = false;
+        if (timed_out && !warned)
+        {
+          warned = true;
+          printf("gpgpusim: REORDER WARNING core %u warp %u still undrained past the "
+                 "timeout: issued_in_pipeline=%u stores_done=%d pending_writes=%d\n",
+                 m_sid, w, m_warp[w]->num_issued_inst_in_pipeline(),
+                 (int)m_warp[w]->stores_done(), (int)m_scoreboard->pendingWrites(w));
+          fflush(stdout);
+        }
+        return;
+      }
+    }
+    else if (m_reorder_state[w] == REORDER_NOT_ARRIVED &&
+             !m_warp[w]->functional_done())
+      expected++;
+  }
+  if (expected == 0 || timed_out)
+    reorder_release(expected != 0);
+}
+
+void shader_core_ctx::reorder_release(bool timed_out)
+{
+  unsigned long long now = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
+  m_stats->reorder_events++;
+  if (timed_out)
+    m_stats->reorder_timeouts++;
+
+  std::vector<unsigned> pool;
+  address_type pc = (address_type)-1;
+  for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
+  {
+    if (m_reorder_state[w] != REORDER_WAITING)
+      continue;
+    if (pc == (address_type)-1)
+      pc = m_reorder_next_pc[w];
+    if (m_reorder_next_pc[w] == pc)
+      pool.push_back(w);
+    else
+      m_stats->reorder_excluded_mismatch++; // different reorder point: released unpermuted
+    m_stats->reorder_wait_cycles += now - m_reorder_arrival_cycle[w];
+    m_reorder_state[w] = REORDER_PASSED;
+  }
+  m_reorder_n_waiting = 0;
+  m_stats->reorder_event_warps += pool.size();
+
+  if (m_config->m_rt_reorder_policy != 2)
+    return;
+
+  struct entry
+  {
+    unsigned key;
+    ptx_thread_info *thd;
+  };
+  std::vector<unsigned> slots;
+  std::vector<entry> threads;
+  for (unsigned w : pool)
+  {
+    const std::bitset<MAX_WARP_SIZE> &live = m_warp[w]->get_active_threads();
+    for (unsigned l = 0; l < m_config->warp_size; l++)
+    {
+      if (!live.test(l))
+        continue;
+      unsigned tid = w * m_config->warp_size + l;
+      ptx_thread_info *t = m_thread[tid];
+      unsigned mask = t->m_reorder_bits >= 32 ? 0xffffffffu
+                                              : ((1u << t->m_reorder_bits) - 1);
+      threads.push_back({t->m_reorder_hint & mask, t});
+      slots.push_back(tid);
+    }
+  }
+  std::stable_sort(threads.begin(), threads.end(),
+                   [](const entry &a, const entry &b) { return a.key < b.key; });
+  for (unsigned i = 0; i < slots.size(); i++)
+  {
+    unsigned tid = slots[i];
+    unsigned w = tid / m_config->warp_size;
+    if (m_thread[tid] == threads[i].thd)
+      continue;
+    m_stats->reorder_threads_moved++;
+    m_thread[tid] = threads[i].thd;
+    ptx_sim_move_thread_to_slot(threads[i].thd, m_sid, m_warp[w]->get_cta_id(), w, tid);
+  }
+}
+
 void shader_core_ctx::broadcast_barrier_reduction(unsigned cta_id,
                                                   unsigned bar_id,
                                                   warp_set_t warps) {
@@ -5316,6 +5480,9 @@ bool shd_warp_t::waiting() {
     return true;
   } else if (m_shader->warp_waiting_at_barrier(m_warp_id)) {
     // waiting for other warps in CTA to reach barrier
+    return true;
+  } else if (m_shader->warp_waiting_at_reorder(m_warp_id)) {
+    // parked in the thread reorder unit
     return true;
   } else if (m_shader->warp_waiting_at_mem_barrier(m_warp_id)) {
     // waiting for memory barrier

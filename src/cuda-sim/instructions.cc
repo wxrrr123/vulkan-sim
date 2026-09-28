@@ -7902,6 +7902,8 @@ void reorder_thread_nv_impl(const ptx_instruction *pI, ptx_thread_info *thread) 
   const operand_info &bits_op = pI->operand_lookup(1);
   uint32_t hint = thread->get_operand_value(hint_op, hint_op, U32_TYPE, thread, 1).u32;
   uint32_t bits = thread->get_operand_value(bits_op, bits_op, U32_TYPE, thread, 1).u32;
+  thread->m_reorder_hint = hint; // read by the SM reorder unit (shader.cc)
+  thread->m_reorder_bits = bits;
 
   // Debug sidecar: one file per kernel launch, record {exec count, hint, bits}
   // per launch pixel (same x/y as load_ray_launch_id), to verify keys arrive intact.

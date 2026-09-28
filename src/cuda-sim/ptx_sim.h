@@ -158,6 +158,7 @@ class ptx_cta_info {
  public:
   ptx_cta_info(unsigned sm_idx, gpgpu_context *ctx);
   void add_thread(ptx_thread_info *thd);
+  void remove_thread(ptx_thread_info *thd);
   unsigned num_threads() const;
   void check_cta_thread_status_and_reset();
   void register_thread_exit(ptx_thread_info *thd);
@@ -353,6 +354,16 @@ class ptx_thread_info {
 
   class gpgpu_sim *get_gpu() {
     return (gpgpu_sim *)m_gpu;
+  }
+  // Reorder unit: operands of the last reorder_thread_nv this thread executed.
+  uint32_t m_reorder_hint = 0;
+  uint32_t m_reorder_bits = 0;
+  // Only the hardware slot ids; unlike init() this keeps the thread's state.
+  void set_hw_slot(unsigned cta_id, unsigned wid, unsigned tid)
+  {
+    m_hw_ctaid = cta_id;
+    m_hw_wid = wid;
+    m_hw_tid = tid;
   }
   unsigned get_hw_tid() const { return m_hw_tid; }
   unsigned get_hw_ctaid() const { return m_hw_ctaid; }

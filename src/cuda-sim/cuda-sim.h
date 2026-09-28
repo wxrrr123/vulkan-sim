@@ -56,6 +56,11 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
                              unsigned hw_cta_id, unsigned hw_warp_id,
                              gpgpu_t *gpu,
                              bool functionalSimulationMode = false);
+// Reorder unit: move a live thread into another hardware slot on the same SM,
+// keeping per-slot functional bookkeeping (warp/CTA info, local memory) consistent.
+void ptx_sim_move_thread_to_slot(class ptx_thread_info *thd, int sid,
+                                 unsigned hw_cta_id, unsigned hw_warp_id,
+                                 unsigned hw_tid);
 const struct gpgpu_ptx_sim_info *ptx_sim_kernel_info(
     const class function_info *kernel);
 

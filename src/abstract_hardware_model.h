@@ -1134,6 +1134,7 @@ class inst_t {
       arch_reg.dst[i] = -1;
     }
     isize = 0;
+    is_reorder = false;
   }
   bool valid() const { return m_decoded; }
   virtual void print_insn(FILE *fp) const {
@@ -1170,6 +1171,7 @@ class inst_t {
   address_type pc;  // program counter address of instruction
   unsigned isize;   // size of instruction in bytes
   op_type op;       // opcode (uarch visible)
+  bool is_reorder; // reorder_thread_nv: handled by the SM reorder unit
 
   barrier_type bar_type;
   reduction_type red_type;
