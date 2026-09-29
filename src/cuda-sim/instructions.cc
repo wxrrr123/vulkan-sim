@@ -7415,6 +7415,20 @@ void image_deref_load_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   std::vector<ImageMemoryTransactionRecord> transactions;
   VulkanRayTracing::getTexture(desc, x, y, 0, c0, c1, c2, c3, transactions); // MRS_TODO: x and y are uint
 
+  /* Feed the timing model this lane's REAL effective address. Without this,
+   * generate_mem_accesses packs each lane's STALE last-effective-address
+   * (zero for lanes that never touched memory) into the access, producing
+   * malformed size/sector-mask fetches that assert in the sectored L2. */
+  if (!transactions.empty()) {
+    thread->set_txl_transactions(transactions[0]);
+  } else {
+    ImageMemoryTransactionRecord dummy;
+    dummy.type = ImageTransactionType::TEXTURE_LOAD;
+    dummy.address = desc; /* any mapped host address; image had no backing */
+    dummy.size = 4;
+    thread->set_txl_transactions(dummy);
+  }
+
   const operand_info &dst1 = pI->operand_lookup(1);
   const operand_info &dst2 = pI->operand_lookup(2);
   const operand_info &dst3 = pI->operand_lookup(3);
@@ -7483,6 +7497,17 @@ void rt_alloc_mem_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   } 
   else {
     address = thread->RT_thread_data->add_variable_decleration_entry(type, name, size);
+    if (type == nir_var_mem_push_const) {
+      // Fresh per-thread push-constant block: fill it with the app's
+      // vkCmdPushConstants data (nothing else ever writes it).
+      uint32_t pc_size = 0;
+      const uint8_t *pc = VulkanRayTracing::getPushConstants(&pc_size);
+      if (pc_size > size) pc_size = size;
+      if (pc_size > 0) {
+        memory_space *mem = thread->get_global_memory();
+        mem->write(address, pc_size, pc, thread, pI);
+      }
+    }
   }
 
   data.u64 = address;

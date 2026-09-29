@@ -34,6 +34,10 @@
 #include <string>
 #include <fstream>
 #include <cmath>
+#include <mutex>
+#include <map>
+#include <atomic>
+#include <set>
 #define BOOST_FILESYSTEM_VERSION 3
 #define BOOST_FILESYSTEM_NO_DEPRECATED 
 #include <boost/filesystem.hpp>
@@ -109,6 +113,7 @@ bool VulkanRayTracing::firstTime = true;
 std::vector<shader_stage_info> VulkanRayTracing::shaders;
 // RayDebugGPUData VulkanRayTracing::rayDebugGPUData[2000][2000] = {0};
 struct DESCRIPTOR_SET_STRUCT* VulkanRayTracing::descriptorSet = NULL;
+struct DESCRIPTOR_SET_STRUCT* VulkanRayTracing::descriptorSets[MAX_DESCRIPTOR_SETS] = {NULL};
 void* VulkanRayTracing::launcher_descriptorSets[MAX_DESCRIPTOR_SETS][MAX_DESCRIPTOR_SET_BINDINGS] = {NULL};
 void* VulkanRayTracing::launcher_deviceDescriptorSets[MAX_DESCRIPTOR_SETS][MAX_DESCRIPTOR_SET_BINDINGS] = {NULL};
 std::vector<void*> VulkanRayTracing::child_addrs_from_driver;
@@ -417,6 +422,78 @@ void VulkanRayTracing::init(uint32_t launch_width, uint32_t launch_height)
 
 bool debugTraversal = false;
 bool found_AS = false;
+// Buffers exposed to shaders via vkGetBufferDeviceAddress (buffer_reference).
+// Recorded here when mesa hands out the address (gpgpusim may not be up yet),
+// then identity-bound into the vulkan address map at vkCmdTraceRaysKHR time.
+// Keyed by address; a re-query of the same buffer just refreshes the size.
+static std::map<void *, uint64_t> bda_buffers;
+static std::set<void *> bda_buffers_bound; // already bind_vulkan_buffer'd
+static std::mutex bda_buffers_mutex;
+
+// Push-constant block captured from vkCmdPushConstants (max size per Vulkan
+// spec / lavapipe is 128*4; keep headroom). Written before the command
+// buffer's vkCmdTraceRaysKHR executes, read by rt_alloc_mem_impl.
+static uint8_t push_constant_data[512];
+static uint32_t push_constant_extent = 0;
+
+void VulkanRayTracing::setPushConstants(const void *data, uint32_t offset,
+                                        uint32_t size)
+{
+    if (offset + size > sizeof(push_constant_data))
+    {
+        printf("gpgpusim: push constants %u+%u exceed capture buffer\n",
+               offset, size);
+        fflush(stdout);
+        abort();
+    }
+    std::memcpy(push_constant_data + offset, data, size);
+    if (offset + size > push_constant_extent)
+        push_constant_extent = offset + size;
+    printf("gpgpusim: captured push constants offset %u size %u\n", offset, size);
+    fflush(stdout);
+}
+
+const uint8_t *VulkanRayTracing::getPushConstants(uint32_t *size_out)
+{
+    *size_out = push_constant_extent;
+    return push_constant_data;
+}
+
+void VulkanRayTracing::registerBufferDeviceAddress(void *addr, uint64_t size)
+{
+    if (!addr || !size)
+        return;
+    std::lock_guard<std::mutex> lock(bda_buffers_mutex);
+    uint64_t &s = bda_buffers[addr];
+    if (size > s)
+        s = size;
+}
+
+// Identity-bind any BDA buffers not yet in the vulkan address map. The
+// shader-visible address is the host pointer itself, so devPtr == bufferAddr.
+// Descriptor-bound buffers keep their gpu_malloc'd keys; these entries only
+// add host-address keys, so RTIV (which never queries BDAs) is untouched.
+static void bind_pending_bda_buffers()
+{
+    std::lock_guard<std::mutex> lock(bda_buffers_mutex);
+    if (bda_buffers_bound.size() == bda_buffers.size())
+        return;
+    gpgpu_context *ctx = GPGPU_Context();
+    CUctx_st *context = GPGPUSim_Context(ctx);
+    memory_space *mem = context->get_device()->get_gpgpu()->get_global_memory();
+    for (auto &kv : bda_buffers)
+    {
+        if (!bda_buffers_bound.insert(kv.first).second)
+            continue;
+        mem->bind_vulkan_buffer(kv.first, kv.second, kv.first);
+        printf("gpgpusim: identity-bound BDA buffer %p size %llu\n",
+               kv.first, (unsigned long long)kv.second);
+    }
+    fflush(stdout);
+}
+
+
+
 VkAccelerationStructureKHR topLevelAS_first = NULL;
 
 void VulkanRayTracing::traceRay(VkAccelerationStructureKHR _topLevelAS,
@@ -1222,15 +1299,20 @@ std::string base_name(std::string & path)
   return path.substr(path.find_last_of("/") + 1);
 }
 
-void VulkanRayTracing::setDescriptorSet(struct DESCRIPTOR_SET_STRUCT *set)
+void VulkanRayTracing::setDescriptorSet(uint32_t setID, struct DESCRIPTOR_SET_STRUCT *set)
 {
-    if (VulkanRayTracing::descriptorSet == NULL) {
-        printf("gpgpusim: set descriptor set 0x%x\n", set);
-        VulkanRayTracing::descriptorSet = set;
+    // Store per setID so shaders that use multiple descriptor sets (e.g. Lumen's set 0 =
+    // resources, set 1 = acceleration structure) resolve each binding against the right set.
+    if (setID < MAX_DESCRIPTOR_SETS) {
+        printf("gpgpusim: set descriptor set[%u] = 0x%x\n", setID, set);
+        VulkanRayTracing::descriptorSets[setID] = set;
+    } else {
+        printf("gpgpusim: setID %u exceeds MAX_DESCRIPTOR_SETS; ignoring.\n", setID);
     }
-    // TODO: Figure out why it sets the descriptor set twice
-    else {
-        printf("gpgpusim: descriptor set already set; ignoring update.\n");
+    // Keep the legacy single-set pointer (first set bound) for the debug/dump helpers that
+    // still reference it.
+    if (VulkanRayTracing::descriptorSet == NULL) {
+        VulkanRayTracing::descriptorSet = set;
     }
 }
 
@@ -1450,7 +1532,9 @@ void VulkanRayTracing::vkCmdTraceRaysKHR(
     // launch_width = 224;
     // launch_height = 160;
     init(launch_width, launch_height);
-    
+
+    bind_pending_bda_buffers();
+
     // Dump Descriptor Sets
     if (dump_trace) 
     {
@@ -1512,14 +1596,24 @@ void VulkanRayTracing::vkCmdTraceRaysKHR(
     ctx = GPGPU_Context();
     CUctx_st *context = GPGPUSim_Context(ctx);
 
+    /* The raygen SBT record holds the group handle, whose first word is the
+     * GLOBAL gpgpusim shader ID (mesa lvp_pipeline_rt.c writes it there).
+     * Look that shader up instead of hardcoding ID 0 — with multiple RT
+     * pipelines (Lumen) every launch used to run pipeline 0's raygen. */
     unsigned long shaderId = *(uint64_t*)raygen_sbt;
-    int index = 0;
+    int index = -1;
     for (int i = 0; i < shaders.size(); i++) {
-        if (shaders[i].ID == 0){
+        if (shaders[i].ID == (int)shaderId){
             index = i;
             break;
         }
     }
+    if (index < 0) {
+        printf("gpgpusim: ERROR raygen SBT shader ID %lu not found in %zu registered shaders\n",
+               shaderId, shaders.size());
+        abort();
+    }
+    printf("gpgpusim: raygen SBT -> shader ID %lu\n", shaderId);
     ctx->func_sim->g_total_shaders = shaders.size();
 
     shader_stage_info raygen_shader = shaders[index];
@@ -1916,7 +2010,9 @@ void* VulkanRayTracing::getDescriptorAddress(uint32_t setID, uint32_t binding)
     }
 #elif defined(MESA_USE_LVPIPE_DRIVER)
     VSIM_DPRINTF("gpgpusim: getDescriptorAddress for binding %d\n", binding);
-    struct lvp_descriptor_set* set = VulkanRayTracing::descriptorSet;
+    struct lvp_descriptor_set* set = (setID < MAX_DESCRIPTOR_SETS && VulkanRayTracing::descriptorSets[setID] != NULL)
+                                         ? VulkanRayTracing::descriptorSets[setID]
+                                         : VulkanRayTracing::descriptorSet;
     const struct lvp_descriptor_set_binding_layout *bind_layout = &set->layout->binding[binding];
     struct lvp_descriptor *desc = &set->descriptors[bind_layout->descriptor_index];
 
@@ -1943,14 +2039,60 @@ void* VulkanRayTracing::getDescriptorAddress(uint32_t setID, uint32_t binding)
             return (void *) desc;
             break;
         default:
-            VSIM_DPRINTF("gpgpusim: unimplemented descriptor type\n");
+            printf("gpgpusim: UNIMPLEMENTED descriptor type %d at setID=%d binding=%d (descriptor_index=%d)\n",
+                   (int)desc->type, (int)setID, (int)binding, (int)bind_layout->descriptor_index);
+            fflush(stdout);
             abort();
     }
 #endif
 }
 
-void VulkanRayTracing::getTexture(struct DESCRIPTOR_STRUCT *desc, 
-                                    float x, float y, float lod, 
+// Decode an IEEE-754 half (float16) to float, for VK_FORMAT_R16G16B16A16_SFLOAT
+// storage-image loads (see getTexture).
+static uint16_t fallback_float_to_half(float f)
+{
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    uint16_t sign = (bits >> 16) & 0x8000;
+    int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = bits & 0x7FFFFF;
+    if (exp <= 0)
+        return sign; // flush denorm/underflow to zero (fine for image data)
+    if (exp >= 0x1F)
+        return sign | 0x7C00; // overflow -> inf
+    return sign | (exp << 10) | (mant >> 13);
+}
+
+static float fallback_half_to_float(uint16_t h)
+{
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+    uint32_t exp = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+    uint32_t bits;
+    if (exp == 0)
+    {
+        if (mant == 0)
+            bits = sign; // +/- zero
+        else
+        {
+            // subnormal: normalize
+            exp = 127 - 15 + 1;
+            while ((mant & 0x400) == 0) { mant <<= 1; exp--; }
+            mant &= 0x3FF;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    }
+    else if (exp == 0x1F)
+        bits = sign | 0x7F800000 | (mant << 13); // Inf/NaN
+    else
+        bits = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+void VulkanRayTracing::getTexture(struct DESCRIPTOR_STRUCT *desc,
+                                    float x, float y, float lod,
                                     float &c0, float &c1, float &c2, float &c3, 
                                     std::vector<ImageMemoryTransactionRecord>& transactions,
                                     uint64_t launcher_offset)
@@ -2019,41 +2161,114 @@ void VulkanRayTracing::getTexture(struct DESCRIPTOR_STRUCT *desc,
     //
     // printf("GIVEN DESC: %p\n", desc);
 
-    if (x < 0 || x > 1)
-        x -= std::floor(x);
-    if (y < 0 || y > 1)
-        y -= std::floor(y);
-
-    // printf("X: %f, Y: %f\n", x, y);
-
     struct lvp_descriptor d = *(struct lvp_descriptor*) desc;
-    const struct lvp_image *img = d.info.sampler_view->image;
+
+    // Storage images (GLSL imageLoad -> NIR image_deref_load) store the
+    // lvp_image* directly in info.image_view.image and are addressed with
+    // INTEGER pixel coords; sampled images (tex) keep it behind
+    // info.sampler_view and use NORMALIZED [0,1] coords. The old code always
+    // used sampler_view->image, which for a storage image reinterprets the
+    // lvp_image* as a pipe_sampler_view* and reads a garbage ->image (crash).
+    bool is_storage = (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    const struct lvp_image *img = is_storage
+        ? (const struct lvp_image *) d.info.image_view.image
+        : d.info.sampler_view->image;
+
+    if (img == NULL || img->pmem == NULL)
+    {
+        c0 = c1 = c2 = c3 = 0.0f;
+        return;
+    }
+
     uint32_t width = img->vk.extent.width;
     uint32_t height = img->vk.extent.height;
-    void *i = img->pmem;
+    VkFormat fmt = img->vk.format;
 
-    uint32_t x_int = std::floor(x * width);
-    uint32_t y_int = std::floor(y * height);
-    if(x_int >= width)
-        x_int -= width;
-    if(y_int >= height)
-        y_int -= height;
+    uint32_t x_int, y_int;
+    if (is_storage)
+    {
+        x_int = (uint32_t) x; // imageLoad passes integer pixel coords
+        y_int = (uint32_t) y;
+    }
+    else
+    {
+        if (x < 0 || x > 1)
+            x -= std::floor(x);
+        if (y < 0 || y > 1)
+            y -= std::floor(y);
+        x_int = (uint32_t) std::floor(x * width);
+        y_int = (uint32_t) std::floor(y * height);
+    }
+    if (width && x_int >= width)
+        x_int = width - 1;
+    if (height && y_int >= height)
+        y_int = height - 1;
 
-    void *c = i + (y_int * height + x_int) * 4;
+    // Bytes per pixel from the actual image format (Lumen's storage images are
+    // rgba32f / rgba16(unorm), not rgba8).
+    uint32_t bpp;
+    switch (fmt)
+    {
+        case VK_FORMAT_R32G32B32A32_SFLOAT: bpp = 16; break;
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+        case VK_FORMAT_R16G16B16A16_UNORM:  bpp = 8;  break;
+        default:                            bpp = 4;  break; // 8-bit unorm
+    }
+
+    size_t offset = (size_t) y_int * width + x_int; // row stride = width
+    uint8_t *px = (uint8_t*) img->pmem + offset * bpp;
 
     ImageMemoryTransactionRecord transaction;
     transaction.type = ImageTransactionType::TEXTURE_LOAD;
-    transaction.address = c;
-    transaction.size = 4;
+    // Model the DRAM access at the sim device address when we have one.
+    transaction.address = img->pmem_gpgpusim
+        ? (void*) ((uint8_t*) img->pmem_gpgpusim + offset * bpp)
+        : (void*) px;
+    transaction.size = bpp;
     transactions.push_back(transaction);
 
-    uint8_t *colors = (uint8_t*) c;
-    c0 = colors[0] / 255.0;
-    c1 = colors[1] / 255.0;
-    c2 = colors[2] / 255.0;
-    c3 = colors[3] / 255.0;
-
-    // abort();
+    switch (fmt)
+    {
+        case VK_FORMAT_R32G32B32A32_SFLOAT:
+        {
+            float *f = (float*) px;
+            c0 = f[0]; c1 = f[1]; c2 = f[2]; c3 = f[3];
+            break;
+        }
+        case VK_FORMAT_R16G16B16A16_UNORM:
+        {
+            uint16_t *u = (uint16_t*) px;
+            c0 = u[0] / 65535.0f; c1 = u[1] / 65535.0f;
+            c2 = u[2] / 65535.0f; c3 = u[3] / 65535.0f;
+            break;
+        }
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+        {
+            uint16_t *h = (uint16_t*) px;
+            c0 = fallback_half_to_float(h[0]); c1 = fallback_half_to_float(h[1]);
+            c2 = fallback_half_to_float(h[2]); c3 = fallback_half_to_float(h[3]);
+            break;
+        }
+        // Hardware decodes *_SRGB formats to linear on sample (alpha stays
+        // linear); reading them as UNORM made textured albedo too bright/desaturated.
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+        {
+            auto srgb_to_linear = [](uint8_t v) {
+                float s = v / 255.0f;
+                return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
+            };
+            c0 = srgb_to_linear(px[0]); c1 = srgb_to_linear(px[1]);
+            c2 = srgb_to_linear(px[2]); c3 = px[3] / 255.0f;
+            break;
+        }
+        default: // 8-bit unorm (RGBA8/BGRA8)
+        {
+            c0 = px[0] / 255.0f; c1 = px[1] / 255.0f;
+            c2 = px[2] / 255.0f; c3 = px[3] / 255.0f;
+            break;
+        }
+    }
 #endif
 }
 
@@ -2202,8 +2417,13 @@ void VulkanRayTracing::image_store(struct DESCRIPTOR_STRUCT* desc, uint32_t gl_L
             strlen("P3\n \n255\n") + std::to_string(width).length() + std::to_string(height).length();
         uint32_t value_offset = (gl_LaunchIDEXT_X + gl_LaunchIDEXT_Y * width) * (3*3 + 3);
         fseeko(img_bin, header_offset + value_offset, SEEK_SET);
-        fprintf(img_bin, "%3.0f %3.0f %3.0f\n", 
-                hitValue_X * 255, hitValue_Y * 255, hitValue_Z * 255);
+        /* clamp: HDR radiance > 1.0 would exceed the fixed 3-char field and
+         * corrupt the fseek-based pixel slots */
+        float ppm_r = hitValue_X < 0.f ? 0.f : (hitValue_X > 1.f ? 1.f : hitValue_X);
+        float ppm_g = hitValue_Y < 0.f ? 0.f : (hitValue_Y > 1.f ? 1.f : hitValue_Y);
+        float ppm_b = hitValue_Z < 0.f ? 0.f : (hitValue_Z > 1.f ? 1.f : hitValue_Z);
+        fprintf(img_bin, "%3.0f %3.0f %3.0f\n",
+                ppm_r * 255, ppm_g * 255, ppm_b * 255);
     }
 
     // Setup transaction record for timing model
@@ -2221,6 +2441,19 @@ void VulkanRayTracing::image_store(struct DESCRIPTOR_STRUCT* desc, uint32_t gl_L
             break; 
 
         case VK_FORMAT_B8G8R8A8_UNORM:
+            transaction.size = 4;
+            break;
+
+        case VK_FORMAT_R16G16B16A16_UNORM:
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+            transaction.size = 8;
+            break;
+
+        case VK_FORMAT_R32G32_SFLOAT:
+            transaction.size = 8;
+            break;
+
+        case VK_FORMAT_R8G8B8A8_UNORM:
             transaction.size = 4;
             break;
 
@@ -2263,7 +2496,92 @@ void VulkanRayTracing::image_store(struct DESCRIPTOR_STRUCT* desc, uint32_t gl_L
     TXL_DPRINTF("Setting transaction for image_store\n");
     thread->set_txl_transactions(transaction);
 
-    // store_image_pixel(image, gl_LaunchIDEXT_X, gl_LaunchIDEXT_Y, 0, pixel, transaction);
+    /* Debug sidecar: raw float32 dump per image resource (unquantized,
+     * unmixed — the shared SCENE ppm interleaves every storage image).
+     * One file per image, pixel = 4 f32 at (y*width+x)*16. */
+    {
+        static std::map<void*, FILE*> float_dumps;
+        static std::mutex float_dump_mutex;
+        std::lock_guard<std::mutex> lk(float_dump_mutex);
+        FILE *&fd = float_dumps[(void*)image];
+        if (fd == NULL) {
+            char fname[128];
+            snprintf(fname, sizeof(fname), "imgdump_%p_%ux%u.f32", (void*)image, width, height);
+            fd = fopen(fname, "wb");
+            printf("gpgpusim: float image dump for %p (%ux%u, fmt %d) -> %s\n",
+                   (void*)image, width, height, vk_format, fname);
+        }
+        if (fd != NULL) {
+            float f[4] = { hitValue_X, hitValue_Y, hitValue_Z, hitValue_W };
+            fseeko(fd, (off_t)(pixelY * width + pixelX) * 16, SEEK_SET);
+            fwrite(f, sizeof(f), 1, fd);
+            fflush(fd);
+        }
+    }
+
+    /* Persist the pixel DATA into the image's host memory so a later
+     * imageLoad (same kernel or a later one — e.g. spatial_reuse reading
+     * direct_lighting_img written by the generate pass) sees it. Addressing
+     * mirrors the load path exactly: img->pmem, linear offset
+     * (y*width + x) * bpp, row stride = width. The tiled address above is
+     * only the timing-model transaction address. */
+    if (image->pmem != NULL) {
+        auto clamp01 = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };
+        size_t data_offset = (size_t) pixelY * width + pixelX;
+        uint8_t *dst = (uint8_t*) image->pmem + data_offset * transaction.size;
+        switch (vk_format) {
+            case VK_FORMAT_R32G32B32A32_SFLOAT:
+            {
+                float f[4] = { hitValue_X, hitValue_Y, hitValue_Z, hitValue_W };
+                memcpy(dst, f, 16);
+                break;
+            }
+            case VK_FORMAT_R32G32_SFLOAT:
+            {
+                float f[2] = { hitValue_X, hitValue_Y };
+                memcpy(dst, f, 8);
+                break;
+            }
+            case VK_FORMAT_R16G16B16A16_UNORM:
+            {
+                uint16_t u[4] = {
+                    (uint16_t)(clamp01(hitValue_X) * 65535.0f + 0.5f),
+                    (uint16_t)(clamp01(hitValue_Y) * 65535.0f + 0.5f),
+                    (uint16_t)(clamp01(hitValue_Z) * 65535.0f + 0.5f),
+                    (uint16_t)(clamp01(hitValue_W) * 65535.0f + 0.5f) };
+                memcpy(dst, u, 8);
+                break;
+            }
+            case VK_FORMAT_R16G16B16A16_SFLOAT:
+            {
+                uint16_t h[4] = {
+                    fallback_float_to_half(hitValue_X),
+                    fallback_float_to_half(hitValue_Y),
+                    fallback_float_to_half(hitValue_Z),
+                    fallback_float_to_half(hitValue_W) };
+                memcpy(dst, h, 8);
+                break;
+            }
+            case VK_FORMAT_B8G8R8A8_UNORM:
+            {
+                dst[0] = (uint8_t)(clamp01(hitValue_Z) * 255.0f + 0.5f);
+                dst[1] = (uint8_t)(clamp01(hitValue_Y) * 255.0f + 0.5f);
+                dst[2] = (uint8_t)(clamp01(hitValue_X) * 255.0f + 0.5f);
+                dst[3] = (uint8_t)(clamp01(hitValue_W) * 255.0f + 0.5f);
+                break;
+            }
+            case VK_FORMAT_R8G8B8A8_UNORM:
+            {
+                dst[0] = (uint8_t)(clamp01(hitValue_X) * 255.0f + 0.5f);
+                dst[1] = (uint8_t)(clamp01(hitValue_Y) * 255.0f + 0.5f);
+                dst[2] = (uint8_t)(clamp01(hitValue_Z) * 255.0f + 0.5f);
+                dst[3] = (uint8_t)(clamp01(hitValue_W) * 255.0f + 0.5f);
+                break;
+            }
+            default:
+                break; // formats already rejected above
+        }
+    }
 #endif
 }
 

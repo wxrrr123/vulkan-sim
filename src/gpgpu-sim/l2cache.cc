@@ -749,12 +749,49 @@ memory_sub_partition::breakdown_request_to_sector_requests(mem_fetch *mf) {
       result.push_back(n_mf);
       byte_sector_mask <<= SECTOR_SIZE;
     }
+  } else if (mf->get_data_size() < SECTOR_SIZE * SECTOR_CHUNCK_SIZE) {
+    /* Generic small/odd-size request (e.g. 4B atomics or sub-line struct
+     * loads from the vulkan RT path; stock CUDA traffic is always 32/64/128).
+     * Split into one request per touched 32B sector of the 128B line. */
+    {
+      static int vsim_odd_size_warned = 0;
+      if (vsim_odd_size_warned < 8) {
+        printf("gpgpusim: sector breakdown: odd data size %u at 0x%llx (mask %zu) type=%d write=%d\n",
+               mf->get_data_size(), (unsigned long long)mf->get_addr(),
+               mf->get_access_sector_mask().count(), (int)mf->get_access_type(),
+               (int)mf->is_write());
+        fflush(stdout);
+        vsim_odd_size_warned++;
+      }
+    }
+    unsigned offset_in_line = mf->get_addr() % (SECTOR_SIZE * SECTOR_CHUNCK_SIZE);
+    new_addr_type line_base = mf->get_addr() - offset_in_line;
+    unsigned start = offset_in_line / SECTOR_SIZE;
+    unsigned end = (offset_in_line + mf->get_data_size() - 1) / SECTOR_SIZE;
+    if (end >= SECTOR_CHUNCK_SIZE) end = SECTOR_CHUNCK_SIZE - 1;
+    for (unsigned j = start; j <= end; ++j) {
+      std::bitset<SECTOR_SIZE * SECTOR_CHUNCK_SIZE> byte_sector_mask;
+      byte_sector_mask.reset();
+      for (unsigned k = j * SECTOR_SIZE; k < (j + 1) * SECTOR_SIZE; ++k)
+        byte_sector_mask.set(k);
+      const mem_access_t *ma = new mem_access_t(
+          mf->get_access_type(), line_base + SECTOR_SIZE * j, SECTOR_SIZE,
+          mf->is_write(), mf->get_access_warp_mask(),
+          mf->get_access_byte_mask() & byte_sector_mask,
+          std::bitset<SECTOR_CHUNCK_SIZE>().set(j), m_gpu->gpgpu_ctx);
+      mem_fetch *n_mf =
+          new mem_fetch(*ma, NULL, mf->get_ctrl_size(), mf->get_wid(),
+                        mf->get_sid(), mf->get_tpc(), mf->get_mem_config(),
+                        m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, mf);
+      result.push_back(n_mf);
+    }
   } else {
     printf(
         "Invalid sector received, address = 0x%06llx, sector mask = %d, byte "
         "mask = , data size = %u\n",
         mf->get_addr(), mf->get_access_sector_mask().count(),
         mf->get_data_size());
+    fflush(stdout);
     assert(0 && "Undefined data size is received");
   }
 

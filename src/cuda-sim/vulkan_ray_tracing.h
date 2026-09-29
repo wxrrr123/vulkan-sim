@@ -54,7 +54,7 @@
 #define MIN_MAX(a,b,c) MAX(MIN((a), (b)), (c))
 #define MAX_MIN(a,b,c) MIN(MAX((a), (b)), (c))
 
-#define MAX_DESCRIPTOR_SETS 1
+#define MAX_DESCRIPTOR_SETS 8
 #define MAX_DESCRIPTOR_SET_BINDINGS 32
 
 // enum class TransactionType {
@@ -256,6 +256,10 @@ private:
     static std::ofstream imageFile;
     static bool firstTime;
     static struct DESCRIPTOR_SET_STRUCT *descriptorSet;
+    // Per-set descriptor storage. vulkan-sim originally assumed a single descriptor set
+    // (RayTracingInVulkan only used set 0), but Lumen binds multiple sets (set 0 = resources,
+    // set 1 = acceleration structure), so getDescriptorAddress must select by setID.
+    static struct DESCRIPTOR_SET_STRUCT *descriptorSets[MAX_DESCRIPTOR_SETS];
 
     // For Launcher
     static void* launcher_descriptorSets[MAX_DESCRIPTOR_SETS][MAX_DESCRIPTOR_SET_BINDINGS];
@@ -301,7 +305,20 @@ public:
     static void setPipelineInfo(VkRayTracingPipelineCreateInfoKHR* pCreateInfos);
     static void setGeometries(VkAccelerationStructureGeometryKHR* pGeometries, uint32_t geometryCount);
     static void setAccelerationStructure(VkAccelerationStructureKHR accelerationStructure);
-    static void setDescriptorSet(struct DESCRIPTOR_SET_STRUCT *set);
+    static void setDescriptorSet(uint32_t setID, struct DESCRIPTOR_SET_STRUCT *set);
+    // Buffers whose device address was handed to the app via
+    // vkGetBufferDeviceAddress. On lavapipe that address IS the host pointer,
+    // so the shader-visible address equals the backing memory; entries are
+    // identity-mapped into the vulkan address map at trace time so
+    // buffer-reference loads/stores hit registered backing instead of the
+    // "backing buffer not found" raw-pointer fallback.
+    static void registerBufferDeviceAddress(void *addr, uint64_t size);
+    // vkCmdPushConstants capture; rt_alloc_mem copies this into every
+    // thread's freshly allocated push_const variable (there is no other
+    // path by which push-constant data reaches simulated shaders).
+    static void setPushConstants(const void *data, uint32_t offset,
+                                 uint32_t size);
+    static const uint8_t *getPushConstants(uint32_t *size_out);
     static void invoke_gpgpusim();
     static uint32_t registerShaders(char * shaderPath, gl_shader_stage shaderType);
     static void vkCmdTraceRaysKHR( // called by vulkan application

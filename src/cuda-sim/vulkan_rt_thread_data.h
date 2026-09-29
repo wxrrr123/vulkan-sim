@@ -70,9 +70,39 @@ typedef struct Vulkan_RT_thread_data {
             return get_hitAttribute();
         
         for (int i = 0; i < variable_decleration_table.size(); i++) {
-            if (variable_decleration_table[i].name == name) {
+            if (variable_decleration_table[i].name == name &&
+                variable_decleration_table[i].size == size) {
                 assert (variable_decleration_table[i].address != NULL);
                 return &(variable_decleration_table[i]);
+            }
+        }
+
+        // Payloads alias between the raygen side (function_temp, its own
+        // variable name) and the callee side (shader_call_data, always named
+        // after the callee's declaration), so name matching fails whenever a
+        // pipeline uses more than one payload location/type. The payload
+        // location is not carried through rt_alloc_mem, so alias by unique
+        // size instead: correct as long as the app's concurrently-live
+        // payload types have distinct sizes (holds for Lumen: 20B GrisHit vs
+        // 4B AnyHit).
+        if (type == nir_var_shader_call_data)
+        {
+            variable_decleration_entry *match = NULL;
+            int nmatch = 0;
+            for (int i = 0; i < variable_decleration_table.size(); i++)
+            {
+                if (variable_decleration_table[i].size == size &&
+                    (variable_decleration_table[i].type == nir_var_function_temp ||
+                     variable_decleration_table[i].type == nir_var_shader_call_data))
+                {
+                    match = &(variable_decleration_table[i]);
+                    nmatch++;
+                }
+            }
+            if (nmatch == 1)
+            {
+                assert(match->address != NULL);
+                return match;
             }
         }
         return NULL;

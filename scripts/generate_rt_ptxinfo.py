@@ -106,6 +106,12 @@ f.seek(0)
 for l in f.readlines():
     linenum += 1
 
+    # ptxas-only: the dumps declare .target sm_10, which rejects atom.*;
+    # bump the temp file's target (register counting is unaffected).
+    if l.strip().startswith('.target sm_10'):
+        tempoutput.write('.target sm_20\n')
+        continue
+
     if (linenum in unknown_op_line):
         idx = unknown_op_line.index(linenum)
         #print("this is the line")
@@ -245,6 +251,57 @@ for l in f.readlines():
 
 f.close()
 tempoutput.close()
+
+# ptxas is strict about register types (e.g. it rejects a .u32/.f32 register used by an
+# instruction of a different type), but Lumen's shaders legitimately reinterpret bits
+# between int and float (NIR SSA values are untyped). This ptxas run only exists to get
+# register/shared-memory usage counts for the occupancy model, where the int/float
+# distinction is irrelevant (a 32-bit register is a 32-bit register). ptxas accepts the
+# untyped .b32/.b64 register types in every typed instruction, so normalize all data
+# register declarations to .b32/.b64 (predicates stay .pred) in this ephemeral estimation
+# copy only - the actual simulation PTX (read by vulkan-sim's own parser) is untouched.
+import re as _re_bits
+_reg_type_re = _re_bits.compile(r'^(\s*\.reg\s+)(\.[usf])(8|16|32|64)(\s)')
+_reg_pred_re = _re_bits.compile(r'^\s*\.reg\s+\.pred\s+%(\S+?);')
+_guard_re = _re_bits.compile(r'^(\s*)@(!?)%(\S+?)\s+bra\b(.*)$')
+# ptxas has no selp.pred (the sim's own parser accepts it; it comes from bcsel over
+# booleans). Register-count-equivalent replacement: two and.pred touching the same regs.
+_selp_pred_re = _re_bits.compile(r'^(\s*)selp\.pred\s+(%\S+?),\s*(%\S+?),\s*(%\S+?),\s*(%\S+?);(.*)$')
+with open("temp_ptxas_shader.ptx", 'r') as _tin:
+    _temp_lines = _tin.readlines()
+
+# Which registers are real predicates (declared .reg .pred)? Only those may be used as
+# branch guards; a boolean value living in a .b32 register (from an inconsistently-typed
+# phi) used as "@%reg bra" trips ptxas's "Predicate expression expected". For those, synth
+# a predicate from the bits with setp.
+_pred_regs = set()
+for _tl in _temp_lines:
+    _pm = _reg_pred_re.match(_tl)
+    if _pm:
+        _pred_regs.add(_pm.group(1))
+
+_pred_decl_written = False
+with open("temp_ptxas_shader.ptx", 'w') as _tout:
+    for _tl in _temp_lines:
+        _tl = _reg_type_re.sub(lambda m: m.group(1) + '.b' + m.group(3) + m.group(4), _tl)
+        _sm = _selp_pred_re.match(_tl)
+        if _sm:
+            _ind, _d, _a, _b, _c, _rest = _sm.groups()
+            _tout.write("%sand.pred %s, %s, %s;%s\n" % (_ind, _d, _a, _b, _rest))
+            _tout.write("%sand.pred %s, %s, %s;\n" % (_ind, _d, _d, _c))
+            continue
+        _gm = _guard_re.match(_tl)
+        if _gm and _gm.group(3) not in _pred_regs:
+            indent, neg, reg, rest = _gm.groups()
+            _tout.write("%ssetp.ne.b32 %%__guard_pred, %%%s, 0;\n" % (indent, reg))
+            _tout.write("%s@%s%%__guard_pred bra%s\n" % (indent, neg, rest))
+        else:
+            _tout.write(_tl)
+        # Declare the scratch predicate once, just inside the first function body ('{'),
+        # so it's after the .version/.target/.entry header (which must lead the file).
+        if not _pred_decl_written and '{' in _tl:
+            _tout.write("\t.reg .pred %__guard_pred;\n")
+            _pred_decl_written = True
 
 # Run PTXAS on the tempoutput and get ptxinfo then delete the tempoutput
 fout = open(inputfile+"info", 'w')
