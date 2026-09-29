@@ -589,7 +589,17 @@ void VulkanRayTracing::traceRay(VkAccelerationStructureKHR _topLevelAS,
 
     bool terminateOnFirstHit = rayFlags & SpvRayFlagsTerminateOnFirstHitKHRMask;
     bool skipClosestHitShader = rayFlags & SpvRayFlagsSkipClosestHitShaderKHRMask;
-    bool skipAnyHitShader = rayFlags & SpvRayFlagsOpaqueKHRMask;
+    // A hit on non-opaque geometry is committed by the any-hit loop that
+    // Mesa's PTX lowering emits only when the pipeline has an any-hit shader.
+    // Without any any-hit shader (e.g. Lumen), nothing would ever commit the
+    // hit: min_thit stays at tmax, the ray is reported as a miss, and shadow
+    // rays without the Opaque flag see every light. Vulkan accepts the hit
+    // when the hit group has no any-hit shader, so treat the ray as opaque.
+    // (Checked over all registered shaders, not per hit group.)
+    bool has_anyhit_shader = false;
+    for (const shader_stage_info &s : shaders)
+        if (s.type == MESA_SHADER_ANY_HIT) { has_anyhit_shader = true; break; }
+    bool skipAnyHitShader = (rayFlags & SpvRayFlagsOpaqueKHRMask) || !has_anyhit_shader;
 
     std::vector<MemoryTransactionRecord> transactions;
     std::vector<MemoryStoreTransactionRecord> store_transactions;
