@@ -633,22 +633,26 @@ const unsigned long long SHARED_MEM_SIZE_MAX = 96 * (1 << 10);
 const unsigned long long LOCAL_MEM_SIZE_MAX = 1 << 14;
 // Volta Titan V has 80 SMs
 const unsigned MAX_STREAMING_MULTIPROCESSORS = 80;
-// Max 2048 threads / SM
-const unsigned MAX_THREAD_PER_SM = 1 << 11;
+// Max threads / SM (raised from 2048 for the single-SM test: 16384 threads)
+const unsigned MAX_THREAD_PER_SM = 1 << 14;
+// The generic address layout (local/BRU regions below) keeps the original
+// 2048 threads/SM sizing, so region boundaries do not move; SM 0 with up to
+// 16384 threads still falls inside those regions.
+const unsigned ADDR_LAYOUT_THREADS_PER_SM = 1 << 11;
 // MAX 64 warps / SM
 const unsigned MAX_WARP_PER_SM = 1 << 6;
 
 const unsigned MAX_BRU_VIR_PER_SPLIT = (16*2);
 const unsigned long long TOTAL_BRU_VIR = 
   (MAX_STREAMING_MULTIPROCESSORS * 
-  MAX_THREAD_PER_SM*MAX_BRU_VIR_PER_SPLIT);
+  ADDR_LAYOUT_THREADS_PER_SM*MAX_BRU_VIR_PER_SPLIT);
 
 const unsigned long long TOTAL_LOCAL_MEM_PER_SM =
-    MAX_THREAD_PER_SM * LOCAL_MEM_SIZE_MAX;
+    ADDR_LAYOUT_THREADS_PER_SM * LOCAL_MEM_SIZE_MAX;
 const unsigned long long TOTAL_SHARED_MEM =
     MAX_STREAMING_MULTIPROCESSORS * SHARED_MEM_SIZE_MAX;
 const unsigned long long TOTAL_LOCAL_MEM =
-    MAX_STREAMING_MULTIPROCESSORS * MAX_THREAD_PER_SM * LOCAL_MEM_SIZE_MAX;
+    MAX_STREAMING_MULTIPROCESSORS * ADDR_LAYOUT_THREADS_PER_SM * LOCAL_MEM_SIZE_MAX;
 // const unsigned long long SHARED_GENERIC_START =
     // GLOBAL_HEAP_START - TOTAL_SHARED_MEM;
 const unsigned long long BRU_VIR_START = 
