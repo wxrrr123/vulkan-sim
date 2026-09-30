@@ -38,7 +38,7 @@ struct shader_core_config;
 class simt_tables;
 
 // Set a hard limit of 32 CTAs per shader [cuda only has 8]
-#define MAX_CTA_PER_SHADER 32
+#define MAX_CTA_PER_SHADER 512
 #define MAX_BARRIERS_PER_CTA 16
 
 // After expanding the vector input and output operands

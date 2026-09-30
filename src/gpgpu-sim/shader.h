@@ -300,7 +300,7 @@ inline unsigned wid_from_hw_tid(unsigned tid, unsigned warp_size) {
   return tid / warp_size;
 };
 
-const unsigned WARP_PER_CTA_MAX = 64;
+const unsigned WARP_PER_CTA_MAX = 512;
 typedef std::bitset<WARP_PER_CTA_MAX> warp_set_t;
 
 int register_bank(int regnum, int wid, unsigned num_banks,
