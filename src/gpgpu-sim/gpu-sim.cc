@@ -276,6 +276,11 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "(0=never)",
       "500000");
   option_parser_register(
+      opp, "-gpgpu_rt_reorder_release_k", OPT_UINT32, &m_rt_reorder_release_k,
+      "release the reorder pool once this many warps wait in it; 0 = wait until "
+      "no warp on the SM is still expected to arrive",
+      "0");
+  option_parser_register(
       opp, "-gpgpu_rt_coherence_engine_config", OPT_CSTR, &m_rt_coherence_engine_config_str,
       "max cycles, hash ",
       "100, d");

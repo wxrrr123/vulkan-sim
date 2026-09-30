@@ -1787,6 +1787,9 @@ class shader_core_config : public core_config {
   // 1 = collect/release only (no permutation), 2 = full sort by key.
   unsigned m_rt_reorder_policy;
   unsigned m_rt_reorder_timeout; // cycles after the first arrival before a forced release
+  // Release rule: 0 = release once no warp on the SM is still expected to arrive;
+  // k > 0 = release as soon as k warps are waiting (or none is still expected).
+  unsigned m_rt_reorder_release_k;
   char * m_rt_coherence_engine_config_str;
   ray_coherence_config m_rt_coherence_engine_config;
   bool bypassL0Complet;

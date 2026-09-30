@@ -5305,8 +5305,10 @@ void shader_core_ctx::reorder_cycle()
              !m_warp[w]->functional_done())
       expected++;
   }
-  if (expected == 0 || timed_out)
-    reorder_release(expected != 0);
+  bool pool_full = m_config->m_rt_reorder_release_k > 0 &&
+                   m_reorder_n_waiting >= m_config->m_rt_reorder_release_k;
+  if (expected == 0 || pool_full || timed_out)
+    reorder_release(expected != 0 && !pool_full);
 }
 
 void shader_core_ctx::reorder_release(bool timed_out)
