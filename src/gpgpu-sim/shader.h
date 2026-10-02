@@ -1282,6 +1282,7 @@ class cache_t;
 
 class rt_unit : public pipelined_simd_unit {
     public:
+  bool diag_full() const;
         rt_unit(mem_fetch_interface *icnt,
                 shader_core_mem_fetch_allocator *mf_allocator,
                 shader_core_ctx *core,
@@ -1892,6 +1893,15 @@ struct shader_core_stats_pod {
   unsigned long long reorder_wait_cycles;      // arrival->release cycles summed over warps
   unsigned long long reorder_excluded_mismatch;// waiting warps left out (different pc)
   unsigned long long reorder_threads_moved;    // threads that changed slot
+  // Diagnostic: per SM-cycle, per warp slot state (sampled just before issue()).
+  // 0 ready, 1 scoreboard (ALU/other), 2 scoreboard (memory), 3 scoreboard (RT),
+  // 4 ready but next inst is RT and the RT unit is full, 5 parked in reorder pool,
+  // 6 barrier/membar/atomic wait, 7 ibuffer empty, 8 functionally done (draining),
+  // 9 no work (slot empty/exited)
+  unsigned long long warp_state[10];
+  // Diagnostic: RT unit occupancy, L1D accesses by source
+  unsigned long long rt_diag_cycles, rt_diag_busy, rt_diag_full, rt_diag_warp_cycles;
+  unsigned long long l1d_ldst_acc, l1d_ldst_hit, l1d_ldst_hitres, l1d_rt_acc, l1d_rt_hit, l1d_rt_hitres;
   unsigned *shader_cycle_distro;
   unsigned *last_shader_cycle_distro;
   std::map<unsigned/*sid*/,std::map<unsigned/*wid*/,std::map<unsigned/*# of entries*/,long long unsigned/*cycles*/> > >  st_size_distro;
@@ -2247,6 +2257,7 @@ class shader_core_ctx : public core_t {
   virtual bool warp_waiting_at_barrier(unsigned warp_id) const;
   // Thread reorder unit (reorder_thread_nv), see shader.cc.
   bool warp_waiting_at_reorder(unsigned warp_id) const;
+  void diag_sample_warp_states();
   void reorder_warp_arrives(unsigned warp_id, const active_mask_t &active_mask,
                             address_type next_pc);
   void reorder_cycle();

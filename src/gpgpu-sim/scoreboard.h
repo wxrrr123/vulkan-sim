@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <set>
+#include <map>
 #include <vector>
 #include "assert.h"
 
@@ -46,6 +47,9 @@ class Scoreboard {
   void releaseRegister(unsigned wid, unsigned regnum);
 
   bool checkCollision(unsigned wid, const inst_t *inst) const;
+  // diagnostic: OR of the kinds (1 = ALU/other, 2 = memory, 4 = RT) of the pending
+  // registers this instruction collides with; 0 = no collision
+  unsigned collisionKinds(unsigned wid, const inst_t *inst) const;
   bool pendingWrites(unsigned wid) const;
   void printContents() const;
   const bool islongop(unsigned warp_id, unsigned regnum);
@@ -61,6 +65,8 @@ class Scoreboard {
   std::vector<std::set<unsigned> > reg_table;
   // Register that depend on a long operation (global, local or tex memory)
   std::vector<std::set<unsigned> > longopregs;
+  // diagnostic: reg -> kind of the instruction that reserved it
+  std::vector<std::map<unsigned, unsigned> > reg_kind;
 
   class gpgpu_t *m_gpu;
 };

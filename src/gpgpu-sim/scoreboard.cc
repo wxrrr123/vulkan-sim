@@ -38,6 +38,7 @@ Scoreboard::Scoreboard(unsigned sid, unsigned n_warps, class gpgpu_t* gpu)
   // Initialize size of table
   reg_table.resize(n_warps);
   longopregs.resize(n_warps);
+  reg_kind.resize(n_warps);
 
   m_gpu = gpu;
 }
@@ -74,6 +75,23 @@ void Scoreboard::releaseRegister(unsigned wid, unsigned regnum) {
   SHADER_DPRINTF(SCOREBOARD, "Release register - warp:%d, reg: %d\n", wid,
                  regnum);
   reg_table[wid].erase(regnum);
+  reg_kind[wid].erase(regnum);
+}
+
+unsigned Scoreboard::collisionKinds(unsigned wid, const class inst_t* inst) const {
+  std::set<int> inst_regs;
+  for (unsigned i = 0; i < inst->outcount; i++) inst_regs.insert(inst->out[i]);
+  for (unsigned j = 0; j < inst->incount; j++) inst_regs.insert(inst->in[j]);
+  if (inst->pred > 0) inst_regs.insert(inst->pred);
+  if (inst->ar1 > 0) inst_regs.insert(inst->ar1);
+  if (inst->ar2 > 0) inst_regs.insert(inst->ar2);
+  unsigned kinds = 0;
+  for (int r : inst_regs) {
+    if (reg_table[wid].find(r) == reg_table[wid].end()) continue;
+    std::map<unsigned, unsigned>::const_iterator k = reg_kind[wid].find(r);
+    kinds |= (k == reg_kind[wid].end()) ? 1 : k->second;
+  }
+  return kinds;
 }
 
 const bool Scoreboard::islongop(unsigned warp_id, unsigned regnum) {
@@ -81,8 +99,11 @@ const bool Scoreboard::islongop(unsigned warp_id, unsigned regnum) {
 }
 
 void Scoreboard::reserveRegisters(const class warp_inst_t* inst) {
+  unsigned kind = inst->op == RT_CORE_OP ? 4
+                  : (inst->is_load() || inst->is_store() || inst->isatomic()) ? 2 : 1;
   for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
     if (inst->out[r] > 0) {
+      reg_kind[inst->warp_id()][inst->out[r]] = kind;
       reserveRegister(inst->warp_id(), inst->out[r]);
       SHADER_DPRINTF(SCOREBOARD, "Reserved register - warp:%d, reg: %d\n",
                      inst->warp_id(), inst->out[r]);

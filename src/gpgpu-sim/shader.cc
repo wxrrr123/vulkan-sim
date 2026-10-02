@@ -840,6 +840,17 @@ void shader_core_stats::print(FILE *fout) const {
           reorder_live_lanes, reorder_events, reorder_event_warps,
           reorder_timeouts, reorder_wait_cycles, reorder_excluded_mismatch,
           reorder_threads_moved);
+  fprintf(fout,
+          "WarpState: ready=%llu sb_alu=%llu sb_mem=%llu sb_rt=%llu rt_full=%llu "
+          "reorder_pool=%llu barrier=%llu ibuf_empty=%llu draining=%llu no_work=%llu\n",
+          warp_state[0], warp_state[1], warp_state[2], warp_state[3], warp_state[4],
+          warp_state[5], warp_state[6], warp_state[7], warp_state[8], warp_state[9]);
+  fprintf(fout, "RTUnitDiag: cycles=%llu busy=%llu full=%llu warp_cycles=%llu\n",
+          rt_diag_cycles, rt_diag_busy, rt_diag_full, rt_diag_warp_cycles);
+  fprintf(fout,
+          "L1DSrc: ldst_acc=%llu ldst_hit=%llu ldst_hit_reserved=%llu rt_acc=%llu "
+          "rt_hit=%llu rt_hit_reserved=%llu\n",
+          l1d_ldst_acc, l1d_ldst_hit, l1d_ldst_hitres, l1d_rt_acc, l1d_rt_hit, l1d_rt_hitres);
   fprintf(fout, "single_issue_nums: ");
   for (unsigned i = 0; i < m_config->gpgpu_num_sched_per_core; i++)
     fprintf(fout, "WS%d:%d\t", i, single_issue_nums[i]);
@@ -2226,6 +2237,7 @@ void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst) {
 
   m_stats->m_num_sim_winsn[m_sid]++;
   m_gpu->gpu_sim_insn += inst.active_count();
+  m_gpu->gpgpu_ctx->stats->ptx_file_line_stats_add_commit(inst.pc, inst.active_count());
   inst.completed(m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle);
 }
 
@@ -2299,6 +2311,13 @@ mem_stage_stall_type ldst_unit::process_cache_access(
     cache_t *cache, new_addr_type address, warp_inst_t &inst,
     std::list<cache_event> &events, mem_fetch *mf,
     enum cache_request_status status) {
+  if ((void *)cache == (void *)m_L1D && status != RESERVATION_FAIL) {
+    int kind = status == HIT ? 0 : status == HIT_RESERVED ? 1 : 2;
+    m_core->get_gpu()->gpgpu_ctx->stats->ptx_file_line_stats_add_l1d(inst.pc, kind);
+    m_stats->l1d_ldst_acc++;
+    if (kind == 0) m_stats->l1d_ldst_hit++;
+    if (kind == 1) m_stats->l1d_ldst_hitres++;
+  }
   mem_stage_stall_type result = NO_RC_FAIL;
   bool write_sent = was_write_sent(events);
   bool read_sent = was_read_sent(events);
@@ -2969,6 +2988,10 @@ void rt_unit::cycle() {
 
   // AerialVision stats
   m_stats->rt_nwarps[m_sid] = n_warps;
+  m_stats->rt_diag_cycles++;
+  if (n_warps > 0) m_stats->rt_diag_busy++;
+  if (n_warps >= m_config->m_rt_max_warps) m_stats->rt_diag_full++;
+  m_stats->rt_diag_warp_cycles += n_warps;
   m_stats->rt_nthreads[m_sid] = active_threads;
   m_stats->rt_naccesses[m_sid] = addr_set.size();
   m_stats->rt_nthreads_intersection[m_sid] = n_threads;
@@ -3528,6 +3551,13 @@ void rt_unit::process_cache_access(baseline_cache *cache, warp_inst_t &inst, mem
   new_addr_type base_addr = mf->get_uncoalesced_base_addr();
 
   // Stalled
+  if ((void *)cache == (void *)L1D && status != RESERVATION_FAIL) {
+    int kind = status == HIT ? 0 : status == HIT_RESERVED ? 1 : 2;
+    m_core->get_gpu()->gpgpu_ctx->stats->ptx_file_line_stats_add_l1d(inst.pc, kind);
+    m_stats->l1d_rt_acc++;
+    if (kind == 0) m_stats->l1d_rt_hit++;
+    if (kind == 1) m_stats->l1d_rt_hitres++;
+  }
   if (status == RESERVATION_FAIL) {
     // If write, add back to write queue
     if (mf->get_is_write()) {
@@ -4851,6 +4881,7 @@ void shader_core_ctx::cycle() {
   read_operands();
   if (m_config->m_rt_reorder_policy > 0)
     reorder_cycle();
+  diag_sample_warp_states();
   issue();
   for (int i = 0; i < m_config->inst_fetch_throughput; ++i) {
     decode();
@@ -5242,6 +5273,39 @@ void shader_core_ctx::decrement_atomic_count(unsigned wid, unsigned n) {
  * (policy 2 = stable sort by key), so each slot's CTA and each warp's live mask
  * and SIMT stack are unchanged. No reorder cost is modelled yet beyond the
  * waiting itself. */
+bool rt_unit::diag_full() const { return n_warps >= m_config->m_rt_max_warps; }
+
+// Diagnostic only: classify every warp slot once per cycle, just before issue().
+void shader_core_ctx::diag_sample_warp_states()
+{
+  for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
+  {
+    shd_warp_t *wp = m_warp[w];
+    unsigned st;
+    if (wp->done_exit())
+      st = 9;
+    else if (wp->functional_done())
+      st = 8;
+    else if (warp_waiting_at_reorder(w))
+      st = 5;
+    else if (wp->waiting())
+      st = 6;
+    else if (wp->ibuffer_empty() || !wp->ibuffer_next_valid())
+      st = 7;
+    else
+    {
+      const warp_inst_t *pI = wp->ibuffer_next_inst();
+      unsigned kinds = pI ? m_scoreboard->collisionKinds(w, pI) : 0;
+      if (kinds & 4) st = 3;
+      else if (kinds & 2) st = 2;
+      else if (kinds & 1) st = 1;
+      else if (pI && pI->op == RT_CORE_OP && m_rt_unit && m_rt_unit->diag_full()) st = 4;
+      else st = 0;
+    }
+    m_stats->warp_state[st]++;
+  }
+}
+
 bool shader_core_ctx::warp_waiting_at_reorder(unsigned warp_id) const
 {
   return m_config->m_rt_reorder_policy > 0 &&
