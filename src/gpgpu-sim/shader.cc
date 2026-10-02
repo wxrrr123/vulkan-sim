@@ -5302,8 +5302,20 @@ void shader_core_ctx::diag_sample_warp_states()
       st = 7;
     else
     {
+      // The ibuffer can hold a stale entry (e.g. left over from the previous
+      // CTA in this slot, or past a taken branch); the scheduler flushes it
+      // when it reaches the warp. Only look inside the entry when it is the
+      // instruction at the warp's current PC, so a stale pointer is never
+      // dereferenced; a stale entry counts as an empty ibuffer.
       const warp_inst_t *pI = wp->ibuffer_next_inst();
-      unsigned kinds = pI ? m_scoreboard->collisionKinds(w, pI) : 0;
+      unsigned pc, rpc;
+      get_pdom_stack_top_info(w, pI, &pc, &rpc);
+      if (pI == NULL || pI != get_next_inst(w, pc))
+      {
+        m_stats->warp_state[7]++;
+        continue;
+      }
+      unsigned kinds = m_scoreboard->collisionKinds(w, pI);
       if (kinds & 4) st = 3;
       else if (kinds & 2) st = 2;
       else if (kinds & 1) st = 1;
