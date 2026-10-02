@@ -2449,6 +2449,14 @@ void ldst_unit::L1_latency_queue_cycle() {
                         m_core->get_gpu()->gpu_sim_cycle +
                             m_core->get_gpu()->gpu_tot_sim_cycle,
                         events);
+      if (status != RESERVATION_FAIL) {  // diagnostic: final outcome only (fails are retried)
+        int kind = status == HIT ? 0 : status == HIT_RESERVED ? 1 : 2;
+        m_core->get_gpu()->gpgpu_ctx->stats->ptx_file_line_stats_add_l1d(
+            mf_next->get_inst().pc, kind);
+        m_stats->l1d_ldst_acc++;
+        if (kind == 0) m_stats->l1d_ldst_hit++;
+        if (kind == 1) m_stats->l1d_ldst_hitres++;
+      }
 
       bool write_sent = was_write_sent(events);
       bool read_sent = was_read_sent(events);
