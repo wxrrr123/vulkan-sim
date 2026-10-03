@@ -89,6 +89,7 @@ class ptx_file_line_stats {
         gmem_warp_count(0),
         exposed_latency(0),
         l1d_hit(0), l1d_hit_reserved(0), l1d_miss(0), commit_warps(0), commit_threads(0),
+        l2_hit(0), l2_hit_reserved(0), l2_miss(0),
         warp_divergence(0) {}
 
   unsigned long exec_count;
@@ -105,6 +106,8 @@ class ptx_file_line_stats {
   // diagnostic: L1D outcome of this instruction's accesses (ldst + RT unit) and
   // committed warp / thread instruction counts (same point as gpgpu_n_tot_w_icount)
   unsigned long long l1d_hit, l1d_hit_reserved, l1d_miss, commit_warps, commit_threads;
+  // diagnostic: L2 outcome of the requests this instruction sent (final outcome, per L2 access)
+  unsigned long long l2_hit, l2_hit_reserved, l2_miss;
   unsigned long long exposed_latency;  // latency exposed as pipeline bubbles
                                        // (attributed to this instruction)
   unsigned long long
@@ -140,7 +143,8 @@ void ptx_stats::ptx_file_line_stats_write_file() {
       pfile,
       "kernel line : count latency dram_traffic smem_bk_conflicts smem_warp "
       "gmem_access_generated gmem_warp exposed_latency warp_divergence "
-      "l1d_hit l1d_hit_reserved l1d_miss commit_warps commit_threads\n");
+      "l1d_hit l1d_hit_reserved l1d_miss commit_warps commit_threads "
+      "l2_hit l2_hit_reserved l2_miss\n");
   for (it = ptx_file_line_stats_tracker.begin();
        it != ptx_file_line_stats_tracker.end(); it++) {
     fprintf(pfile, "%s %i : ", it->first.st.c_str(), it->first.line);
@@ -156,6 +160,8 @@ void ptx_stats::ptx_file_line_stats_write_file() {
     fprintf(pfile, "%llu %llu %llu %llu %llu ", it->second.l1d_hit,
             it->second.l1d_hit_reserved, it->second.l1d_miss,
             it->second.commit_warps, it->second.commit_threads);
+    fprintf(pfile, "%llu %llu %llu ", it->second.l2_hit, it->second.l2_hit_reserved,
+            it->second.l2_miss);
     fprintf(pfile, "\n");
   }
   fflush(pfile);
@@ -179,6 +185,17 @@ void ptx_stats::ptx_file_line_stats_add_l1d(unsigned pc, int kind) {
   if (kind == 0) s.l1d_hit++;
   else if (kind == 1) s.l1d_hit_reserved++;
   else s.l1d_miss++;
+}
+
+// diagnostic: L2 access outcome (0 = hit, 1 = hit reserved, 2 = miss)
+void ptx_stats::ptx_file_line_stats_add_l2(unsigned pc, int kind) {
+  const ptx_instruction *pInsn = gpgpu_ctx->pc_to_instruction(pc);
+  if (pInsn == NULL) return;
+  ptx_file_line_stats &s = ptx_file_line_stats_tracker[ptx_file_line(
+      pInsn->source_file(), pInsn->source_line())];
+  if (kind == 0) s.l2_hit++;
+  else if (kind == 1) s.l2_hit_reserved++;
+  else s.l2_miss++;
 }
 
 // diagnostic: one committed warp instruction with `active` active threads

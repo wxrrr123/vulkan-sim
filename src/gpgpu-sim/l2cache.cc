@@ -45,6 +45,8 @@
 #include "mem_fetch.h"
 #include "mem_latency_stat.h"
 #include "shader.h"
+#include "../cuda-sim/ptx-stats.h"
+#include "../../libcuda/gpgpu_context.h"
 
 mem_fetch *partition_mf_allocator::alloc(new_addr_type addr,
                                          mem_access_type type, unsigned size,
@@ -511,6 +513,12 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
             m_L2cache->access(mf->get_addr(), mf,
                               m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,
                               events);
+        if (status != RESERVATION_FAIL && mf->get_pc() != (unsigned)-1 &&
+            (mf->get_pc() < BRU_VIR_START || mf->get_pc() > GLOBAL_HEAP_START)) {
+          // diagnostic: final L2 outcome per PTX line (fails are retried, not counted)
+          int kind = status == HIT ? 0 : status == HIT_RESERVED ? 1 : 2;
+          m_gpu->gpgpu_ctx->stats->ptx_file_line_stats_add_l2(mf->get_pc(), kind);
+        }
         bool write_sent = was_write_sent(events);
         bool read_sent = was_read_sent(events);
         MEM_SUBPART_DPRINTF("Probing L2 cache Address=%llx, status=%u\n",

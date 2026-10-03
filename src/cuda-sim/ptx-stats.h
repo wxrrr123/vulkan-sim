@@ -60,6 +60,7 @@ class ptx_stats {
   void ptx_file_line_stats_add_latency(unsigned pc, unsigned latency);
   void ptx_file_line_stats_add_l1d(unsigned pc, int kind);
   void ptx_file_line_stats_add_commit(unsigned pc, unsigned active);
+  void ptx_file_line_stats_add_l2(unsigned pc, int kind);
   void ptx_file_line_stats_add_dram_traffic(unsigned pc, unsigned dram_traffic);
   void ptx_file_line_stats_add_smem_bank_conflict(unsigned pc,
                                                   unsigned n_way_bkconflict);
