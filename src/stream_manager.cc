@@ -238,6 +238,7 @@ stream_manager::stream_manager(gpgpu_sim *gpu, bool cuda_launch_blocking) {
   m_gpu = gpu;
   m_service_stream_zero = false;
   m_cuda_launch_blocking = cuda_launch_blocking;
+  m_grid_uid = 0;
   pthread_mutex_init(&m_lock, NULL);
   m_last_stream = m_streams.begin();
 }
@@ -283,13 +284,23 @@ bool stream_manager::special_check_finished_kernel() {
 }
 
 bool stream_manager::register_finished_kernel() {
-  return register_finished_kernel(m_grid_uid);
+  bool retired = register_finished_kernel(m_grid_uid);
+  // Once retired, the uid must not be looked up again (the simulation thread
+  // calls this after every inner loop, also when only functional kernels ran).
+  if (retired) m_grid_uid = 0;
+  return retired;
 }
 
 bool stream_manager::register_finished_kernel(unsigned grid_uid) {
   // called by gpu simulation thread
   if (grid_uid > 0) {
-    CUstream_st *stream = m_grid_id_to_stream[grid_uid];
+    // A functionally simulated kernel retires itself at the end of
+    // gpgpu_cuda_ptx_sim_main_func(); a later call for the same (or a stale)
+    // uid must not create an empty map entry and dereference it.
+    std::map<unsigned, CUstream_st *>::iterator found =
+        m_grid_id_to_stream.find(grid_uid);
+    if (found == m_grid_id_to_stream.end() || found->second == NULL) return false;
+    CUstream_st *stream = found->second;
     kernel_info_t *kernel = stream->front().get_kernel();
     assert(grid_uid == kernel->get_uid());
 
