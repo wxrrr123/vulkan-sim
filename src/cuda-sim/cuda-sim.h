@@ -61,6 +61,18 @@ unsigned ptx_sim_init_thread(kernel_info_t &kernel,
 void ptx_sim_move_thread_to_slot(class ptx_thread_info *thd, int sid,
                                  unsigned hw_cta_id, unsigned hw_warp_id,
                                  unsigned hw_tid);
+// TSU-style reorder pool (threads leave their hardware slot while they wait):
+// a per-SM CTA record that owns pooled threads,
+class ptx_cta_info *ptx_sim_tsu_pool_cta(int sid, gpgpu_t *gpu);
+// detach a live thread from its slot into that record (the slot's local memory
+// mapping is dropped so a new thread initialised there gets its own),
+void ptx_sim_tsu_detach_thread(class ptx_thread_info *thd, int sid,
+                               unsigned hw_tid, class ptx_cta_info *pool_cta);
+// and make a free hardware CTA slot ready to take resumed threads: delete the
+// finished threads still recorded in its lanes and reset its CTA record.
+void ptx_sim_tsu_prepare_slot(class ptx_thread_info **slot_threads,
+                              unsigned n_lanes, int sid, unsigned hw_cta_id,
+                              unsigned hw_warp_id, gpgpu_t *gpu);
 const struct gpgpu_ptx_sim_info *ptx_sim_kernel_info(
     const class function_info *kernel);
 

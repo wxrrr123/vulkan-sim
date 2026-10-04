@@ -535,6 +535,7 @@ class gpgpu_sim : public gpgpu_t {
   unsigned threads_per_core() const;
   bool get_more_cta_left() const;
   bool kernel_more_cta_left(kernel_info_t *kernel) const;
+  bool tsu_pending() const;  // any SM still holds TSU-pooled or regrouped threads
   bool hit_max_cta_count() const;
   kernel_info_t *select_kernel();
   void decrement_kernel_latency();

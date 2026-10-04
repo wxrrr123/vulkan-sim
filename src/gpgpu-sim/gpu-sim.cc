@@ -268,8 +268,13 @@ void shader_core_config::reg_options(class OptionParser *opp) {
   option_parser_register(
       opp, "-gpgpu_rt_reorder_policy", OPT_UINT32, &m_rt_reorder_policy,
       "reorder_thread_nv: 0=off (plain ALU op), 1=collect/release only, "
-      "2=full sort by key",
+      "2=full sort by key, 3=TSU-style pool (waiting warps release their slot; "
+      "threads are sorted by key and regrouped into new warps)",
       "0");
+  option_parser_register(
+      opp, "-gpgpu_rt_tsu_pool_threads", OPT_UINT32, &m_rt_tsu_pool_threads,
+      "policy 3: release the per-SM pool once it holds this many threads",
+      "512");
   option_parser_register(
       opp, "-gpgpu_rt_reorder_timeout", OPT_UINT32, &m_rt_reorder_timeout,
       "cycles after the first arrival before the reorder pool is force-released "
@@ -1646,7 +1651,15 @@ void shader_core_ctx::rt_mem_instruction_stats(const warp_inst_t &inst) {
   }
 }
 
+bool gpgpu_sim::tsu_pending() const {
+  for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++)
+    if (m_cluster[i]->tsu_pending()) return true;
+  return false;
+}
+
 bool shader_core_ctx::can_issue_1block(kernel_info_t &kernel) {
+  // TSU pool: regrouped warps get free slots before new CTAs do.
+  if (m_config->m_rt_reorder_policy == 3 && !m_tsu_resume.empty()) return false;
   // Jin: concurrent kernels on one SM
   if (m_config->gpgpu_concurrent_kernel_sm) {
     if (m_config->max_cta(kernel) < 1) return false;

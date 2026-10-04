@@ -85,6 +85,8 @@ void exec_shader_core_ctx::create_shd_warp() {
   m_reorder_next_pc.assign(m_config->max_warps_per_shader, (address_type)-1);
   m_reorder_first_wait_cycle = 0;
   m_reorder_n_waiting = 0;
+  m_tsu_pc = (address_type)-1;
+  m_tsu_first_arrival = 0;
 }
 
 void shader_core_ctx::create_front_pipeline() {
@@ -840,6 +842,16 @@ void shader_core_stats::print(FILE *fout) const {
           reorder_live_lanes, reorder_events, reorder_event_warps,
           reorder_timeouts, reorder_wait_cycles, reorder_excluded_mismatch,
           reorder_threads_moved);
+  fprintf(fout,
+          "TSU: suspended_warps=%llu suspended_threads=%llu releases=%llu "
+          "release_full=%llu release_timeout=%llu release_drain=%llu "
+          "released_threads=%llu pool_max=%llu resumed_warps=%llu "
+          "resumed_threads=%llu wait_cycles=%llu pool_hist=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+          tsu_suspended_warps, tsu_suspended_threads, tsu_releases, tsu_release_full,
+          tsu_release_timeout, tsu_release_drain, tsu_released_threads, tsu_pool_max,
+          tsu_resumed_warps, tsu_resumed_threads, tsu_wait_cycles, tsu_pool_hist[0],
+          tsu_pool_hist[1], tsu_pool_hist[2], tsu_pool_hist[3], tsu_pool_hist[4],
+          tsu_pool_hist[5], tsu_pool_hist[6], tsu_pool_hist[7]);
   fprintf(fout,
           "WarpState: ready=%llu sb_alu=%llu sb_mem=%llu sb_rt=%llu rt_full=%llu "
           "reorder_pool=%llu barrier=%llu ibuf_empty=%llu draining=%llu no_work=%llu\n",
@@ -4085,7 +4097,7 @@ void shader_core_ctx::register_cta_thread_exit(unsigned cta_num,
         cta_num, m_gpu->gpu_sim_cycle, m_gpu->gpu_tot_sim_cycle,
         m_n_active_cta);
 
-    if (m_n_active_cta == 0) {
+    if (m_n_active_cta == 0 && !tsu_pending()) {
       SHADER_DPRINTF(
           LIVENESS,
           "GPGPU-Sim uArch: Empty (last released kernel %u \'%s\').\n",
@@ -4103,7 +4115,9 @@ void shader_core_ctx::register_cta_thread_exit(unsigned cta_num,
     release_shader_resource_1block(cta_num, *kernel);
     kernel->dec_running();
     if (!m_gpu->kernel_more_cta_left(kernel)) {
-      if (!kernel->running()) {
+      // TSU pool: threads waiting in a pool or regrouped (not yet dispatched)
+      // belong to no running CTA, but the kernel is not finished.
+      if (!kernel->running() && !m_gpu->tsu_pending()) {
         SHADER_DPRINTF(LIVENESS,
                        "GPGPU-Sim uArch: GPU detected kernel %u \'%s\' "
                        "finished on shader %u.\n",
@@ -5356,6 +5370,10 @@ void shader_core_ctx::reorder_warp_arrives(unsigned warp_id,
 
 void shader_core_ctx::reorder_cycle()
 {
+  if (m_config->m_rt_reorder_policy == 3) {
+    tsu_cycle();
+    return;
+  }
   if (m_reorder_n_waiting == 0)
     return;
   unsigned long long now = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
@@ -5457,6 +5475,213 @@ void shader_core_ctx::reorder_release(bool timed_out)
     m_thread[tid] = threads[i].thd;
     ptx_sim_move_thread_to_slot(threads[i].thd, m_sid, m_warp[w]->get_cta_id(), w, tid);
   }
+}
+
+// ---------------------------------------------------------------------------
+// TSU-style reorder pool (policy 3).
+//
+// A converged warp that reaches reorder_thread_nv waits (as in policies 1/2)
+// until it has drained; then its live threads leave the hardware slot for a
+// per-SM pool and the slot is retired like a finished one-warp CTA (without
+// counting the CTA as completed), so new CTAs can come in. The pool is
+// released once it holds m_rt_tsu_pool_threads threads, or the timeout since
+// the first arrival expires, or no warp can still arrive on this SM (none is
+// expected and the kernel has no CTA left). On release the threads are
+// stable-sorted by key and cut into groups of warp_size; each group becomes a
+// new warp in a free slot (before any new CTA) and continues after the
+// reorder point. Register save/restore traffic is not modelled (M1).
+// Supported kernels: one-warp CTAs, no shared memory, no barriers.
+// ---------------------------------------------------------------------------
+bool shader_core_ctx::tsu_warp_drained(unsigned w) const
+{
+  return m_warp[w]->num_issued_inst_in_pipeline() == 0 &&
+         m_warp[w]->stores_done() && !m_scoreboard->pendingWrites(w) &&
+         !m_warp[w]->imiss_pending();
+}
+
+void shader_core_ctx::tsu_cycle()
+{
+  unsigned long long now = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
+
+  // 1. drained waiting warps give up their slot
+  if (m_reorder_n_waiting > 0)
+    for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
+      if (m_reorder_state[w] == REORDER_WAITING && tsu_warp_drained(w))
+        tsu_suspend(w, now);
+
+  // 2. release rule
+  if (!m_tsu_pool.empty()) {
+    bool full = m_tsu_pool.size() >= m_config->m_rt_tsu_pool_threads;
+    bool timed_out = m_config->m_rt_reorder_timeout > 0 &&
+                     now - m_tsu_first_arrival >= m_config->m_rt_reorder_timeout;
+    bool can_arrive = m_reorder_n_waiting > 0 ||
+                      (m_kernel != NULL && m_gpu->kernel_more_cta_left(m_kernel));
+    if (!can_arrive)
+      for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
+        if (m_reorder_state[w] == REORDER_NOT_ARRIVED && !m_warp[w]->functional_done()) {
+          can_arrive = true;
+          break;
+        }
+    if (full)
+      tsu_release(0);
+    else if (timed_out)
+      tsu_release(1);
+    else if (!can_arrive)
+      tsu_release(2);
+  }
+
+  // 3. regrouped warps into free slots
+  while (!m_tsu_resume.empty() && tsu_dispatch_one(now))
+    ;
+}
+
+void shader_core_ctx::tsu_suspend(unsigned w, unsigned long long now)
+{
+  kernel_info_t *kernel = m_kernel;
+  assert(kernel != NULL);
+  assert(!m_config->gpgpu_concurrent_kernel_sm);
+  if (kernel->threads_per_cta() > m_config->warp_size ||
+      ptx_sim_kernel_info(kernel->entry())->smem != 0) {
+    printf("gpgpusim: TSU reorder pool supports only one-warp CTAs without shared "
+           "memory (kernel %s: %u threads per CTA)\n",
+           kernel->name().c_str(), kernel->threads_per_cta());
+    fflush(stdout);
+    abort();
+  }
+  address_type pc = m_reorder_next_pc[w];
+  if (!tsu_pending())  // empty pool: a new kernel / reorder point may start
+    m_tsu_pc = pc;
+  if (pc != m_tsu_pc) {
+    printf("gpgpusim: TSU reorder pool: two reorder points in flight on core %u "
+           "(0x%llx and 0x%llx); not supported\n",
+           m_sid, (unsigned long long)m_tsu_pc, (unsigned long long)pc);
+    fflush(stdout);
+    abort();
+  }
+  if (m_tsu_pool.empty())
+    m_tsu_first_arrival = m_reorder_arrival_cycle[w];
+
+  // Nothing of this warp may stay in the front end: the slot is reused.
+  m_warp[w]->ibuffer_flush();
+  if (m_inst_fetch_buffer.m_valid && m_inst_fetch_buffer.m_warp_id == w)
+    m_inst_fetch_buffer.m_valid = false;
+
+  ptx_cta_info *pool_cta = ptx_sim_tsu_pool_cta(m_sid, m_cluster->get_gpu());
+  unsigned cta = m_warp[w]->get_cta_id();
+  const std::bitset<MAX_WARP_SIZE> live = m_warp[w]->get_active_threads();
+  unsigned n_live = 0;
+  for (unsigned l = 0; l < m_config->warp_size; l++) {
+    unsigned tid = w * m_config->warp_size + l;
+    if (!m_threadState[tid].m_active) continue;
+    m_threadState[tid].m_active = false;
+    m_active_threads.reset(tid);
+    if (live.test(l)) {
+      ptx_thread_info *t = m_thread[tid];
+      unsigned mask = t->m_reorder_bits >= 32 ? 0xffffffffu
+                                              : ((1u << t->m_reorder_bits) - 1);
+      tsu_entry e = {t->m_reorder_hint & mask, t, m_reorder_arrival_cycle[w]};
+      m_tsu_pool.push_back(e);
+      ptx_sim_tsu_detach_thread(t, m_sid, tid, pool_cta);
+      m_thread[tid] = NULL;
+      m_warp[w]->set_completed(l);
+      n_live++;  // stays counted in m_not_completed until it really exits
+    } else {
+      m_not_completed -= 1;  // exited before the reorder point
+    }
+  }
+  m_warp[w]->set_done_exit();
+  --m_active_warps;
+  assert(m_active_warps >= 0);
+  m_reorder_state[w] = REORDER_NOT_ARRIVED;
+  m_reorder_n_waiting--;
+
+  // retire the slot's one-warp CTA (not counted as completed); the warp
+  // leaves the barrier set first, as a warp whose threads all exited does
+  m_barriers.warp_exit(w);
+  m_cta_status[cta] = 0;
+  m_n_active_cta--;
+  m_barriers.deallocate_barrier(cta);
+  shader_CTA_count_unlog(m_sid, 1);
+  release_shader_resource_1block(cta, *kernel);
+  kernel->dec_running();
+
+  m_stats->tsu_suspended_warps++;
+  m_stats->tsu_suspended_threads += n_live;
+}
+
+void shader_core_ctx::tsu_release(unsigned reason)
+{
+  unsigned n = m_tsu_pool.size();
+  m_stats->tsu_releases++;
+  if (reason == 0) m_stats->tsu_release_full++;
+  else if (reason == 1) m_stats->tsu_release_timeout++;
+  else m_stats->tsu_release_drain++;
+  m_stats->tsu_released_threads += n;
+  if (n > m_stats->tsu_pool_max) m_stats->tsu_pool_max = n;
+  unsigned b = 0;
+  for (unsigned lim = 32; b < 7 && n > lim; lim *= 2) b++;
+  m_stats->tsu_pool_hist[b]++;
+
+  std::stable_sort(m_tsu_pool.begin(), m_tsu_pool.end(),
+                   [](const tsu_entry &a, const tsu_entry &b) { return a.key < b.key; });
+  for (unsigned i = 0; i < n; i += m_config->warp_size) {
+    unsigned e = std::min(n, i + m_config->warp_size);
+    m_tsu_resume.push_back(std::vector<tsu_entry>(m_tsu_pool.begin() + i,
+                                                  m_tsu_pool.begin() + e));
+  }
+  m_tsu_pool.clear();
+}
+
+bool shader_core_ctx::tsu_dispatch_one(unsigned long long now)
+{
+  assert(m_kernel != NULL);
+  kernel_info_t &kernel = *m_kernel;
+  if (m_n_active_cta >= kernel_max_cta_per_shader) return false;
+  unsigned s = (unsigned)-1;
+  for (unsigned i = 0; i < kernel_max_cta_per_shader; i++)
+    if (m_cta_status[i] == 0 && m_warp[i]->done_exit() &&
+        m_warp[i]->hardware_done() && !m_scoreboard->pendingWrites(i)) {
+      s = i;
+      break;
+    }
+  if (s == (unsigned)-1) return false;
+
+  std::vector<tsu_entry> group = m_tsu_resume.front();
+  m_tsu_resume.pop_front();
+  unsigned w = s;  // one-warp CTAs: hardware CTA slot i is warp slot i
+  unsigned start = w * m_config->warp_size;
+  kernel.inc_running();
+  reinit(start, start + m_config->warp_size, false);
+  ptx_sim_tsu_prepare_slot(&m_thread[start], m_config->warp_size, m_sid, s, w,
+                           m_cluster->get_gpu());
+  simt_mask_t mask;
+  for (unsigned l = 0; l < group.size(); l++) {
+    unsigned tid = start + l;
+    ptx_thread_info *t = group[l].thd;
+    m_thread[tid] = t;
+    ptx_sim_move_thread_to_slot(t, m_sid, s, w, tid);
+    assert(t->get_pc() == m_tsu_pc);
+    m_threadState[tid].m_cta_id = s;
+    m_threadState[tid].m_active = true;
+    assert(!m_active_threads.test(tid));
+    m_active_threads.set(tid);
+    mask.set(l);
+    m_stats->tsu_wait_cycles += now - group[l].arrival;
+  }
+  m_cta_status[s] = group.size();
+  warp_set_t warps;
+  warps.set(w);
+  m_barriers.allocate_barrier(s, warps);
+  m_n_active_cta++;
+  shader_CTA_count_log(m_sid, 1);
+  m_simt_stack[w]->launch(m_tsu_pc, mask);
+  m_warp[w]->init(m_tsu_pc, s, w, mask, m_dynamic_warp_id);
+  ++m_dynamic_warp_id;
+  m_reorder_state[w] = REORDER_PASSED;
+  ++m_active_warps;
+  m_stats->tsu_resumed_warps++;
+  m_stats->tsu_resumed_threads += group.size();
+  return true;
 }
 
 void shader_core_ctx::broadcast_barrier_reduction(unsigned cta_id,
@@ -5969,6 +6194,12 @@ float simt_core_cluster::get_current_occupancy(
     aggregate += m_core[i]->get_current_occupancy(active, total);
   }
   return aggregate / m_config->n_simt_cores_per_cluster;
+}
+
+bool simt_core_cluster::tsu_pending() const {
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; i++)
+    if (m_core[i]->tsu_pending()) return true;
+  return false;
 }
 
 unsigned simt_core_cluster::get_n_active_cta() const {

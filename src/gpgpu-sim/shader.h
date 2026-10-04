@@ -1791,6 +1791,9 @@ class shader_core_config : public core_config {
   // Release rule: 0 = release once no warp on the SM is still expected to arrive;
   // k > 0 = release as soon as k warps are waiting (or none is still expected).
   unsigned m_rt_reorder_release_k;
+  // Policy 3 (TSU-style pool): release once this many threads wait (or the
+  // timeout, or no warp can still arrive). Waiting warps give up their slot.
+  unsigned m_rt_tsu_pool_threads;
   char * m_rt_coherence_engine_config_str;
   ray_coherence_config m_rt_coherence_engine_config;
   bool bypassL0Complet;
@@ -1893,6 +1896,19 @@ struct shader_core_stats_pod {
   unsigned long long reorder_wait_cycles;      // arrival->release cycles summed over warps
   unsigned long long reorder_excluded_mismatch;// waiting warps left out (different pc)
   unsigned long long reorder_threads_moved;    // threads that changed slot
+  // TSU-style pool (policy 3), cumulative over all SMs and kernels.
+  unsigned long long tsu_suspended_warps;      // warps that left their slot for the pool
+  unsigned long long tsu_suspended_threads;    // threads put into the pool
+  unsigned long long tsu_releases;             // pool releases
+  unsigned long long tsu_release_full;         // ... because the pool reached P threads
+  unsigned long long tsu_release_timeout;      // ... because of the timeout
+  unsigned long long tsu_release_drain;        // ... because no warp could still arrive
+  unsigned long long tsu_released_threads;     // threads summed over releases
+  unsigned long long tsu_pool_max;             // largest pool at a release
+  unsigned long long tsu_pool_hist[8];         // pool size at release: <=32,64,128,256,512,1024,2048,>2048
+  unsigned long long tsu_resumed_warps;        // regrouped warps dispatched into a slot
+  unsigned long long tsu_resumed_threads;      // threads in them
+  unsigned long long tsu_wait_cycles;          // arrival -> resume dispatch, summed over threads
   // Diagnostic: per SM-cycle, per warp slot state (sampled just before issue()).
   // 0 ready, 1 scoreboard (ALU/other), 2 scoreboard (memory), 3 scoreboard (RT),
   // 4 ready but next inst is RT and the RT unit is full, 5 parked in reorder pool,
@@ -2599,6 +2615,29 @@ class shader_core_ctx : public core_t {
   unsigned long long m_reorder_first_wait_cycle;
   unsigned m_reorder_n_waiting;
   void reorder_release(bool timed_out);
+
+  // TSU-style pool (policy 3): warps at the reorder point give up their
+  // hardware slot; their threads wait here, are sorted by key on release and
+  // regrouped into new warps that get free slots before new CTAs do.
+  struct tsu_entry {
+    unsigned key;
+    class ptx_thread_info *thd;
+    unsigned long long arrival;
+  };
+  std::vector<tsu_entry> m_tsu_pool;
+  std::deque<std::vector<tsu_entry> > m_tsu_resume;  // regrouped, waiting for a slot
+  address_type m_tsu_pc;                             // where resumed warps continue
+  unsigned long long m_tsu_first_arrival;
+  bool tsu_warp_drained(unsigned warp_id) const;
+  void tsu_cycle();
+  void tsu_suspend(unsigned warp_id, unsigned long long now);
+  void tsu_release(unsigned reason);  // 0 full, 1 timeout, 2 drain
+  bool tsu_dispatch_one(unsigned long long now);
+
+ public:
+  bool tsu_pending() const { return !m_tsu_pool.empty() || !m_tsu_resume.empty(); }
+
+ protected:
   ifetch_buffer_t m_inst_fetch_buffer;
   std::vector<register_set> m_pipeline_reg;
   Scoreboard *m_scoreboard;
@@ -2713,6 +2752,7 @@ class simt_core_cluster {
   unsigned get_not_completed() const;
   void print_not_completed(FILE *fp) const;
   unsigned get_n_active_cta() const;
+  bool tsu_pending() const;  // any core still holds pooled or regrouped threads
   unsigned get_n_active_sms() const;
   gpgpu_sim *get_gpu() { return m_gpu; }
 

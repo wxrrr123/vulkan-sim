@@ -2220,6 +2220,56 @@ static std::map<unsigned, ptx_warp_info *> ptx_warp_lookup;
 static std::map<unsigned, std::map<unsigned, memory_space *>>
     local_memory_lookup;
 
+ptx_cta_info *ptx_sim_tsu_pool_cta(int sid, gpgpu_t *gpu)
+{
+  // sm_idx values of real CTA records are hw_cta_id * num_shaders + sid, all
+  // far below this range, so the record can never collide with a slot.
+  static std::map<int, ptx_cta_info *> pool_ctas;
+  std::map<int, ptx_cta_info *>::iterator p = pool_ctas.find(sid);
+  if (p != pool_ctas.end()) return p->second;
+  ptx_cta_info *cta = new ptx_cta_info(0x7f000000u + (unsigned)sid, gpu->gpgpu_ctx);
+  pool_ctas[sid] = cta;
+  return cta;
+}
+
+void ptx_sim_tsu_detach_thread(ptx_thread_info *thd, int sid, unsigned hw_tid,
+                               ptx_cta_info *pool_cta)
+{
+  thd->m_cta_info->remove_thread(thd);
+  pool_cta->add_thread(thd);
+  thd->m_cta_info = pool_cta;
+  std::map<unsigned, memory_space *> &lm = local_memory_lookup[sid];
+  std::map<unsigned, memory_space *>::iterator l = lm.find(hw_tid);
+  if (l != lm.end() && l->second == thd->m_local_mem) lm.erase(l);
+}
+
+void ptx_sim_tsu_prepare_slot(ptx_thread_info **slot_threads, unsigned n_lanes,
+                              int sid, unsigned hw_cta_id, unsigned hw_warp_id,
+                              gpgpu_t *gpu)
+{
+  for (unsigned i = 0; i < n_lanes; i++) {
+    ptx_thread_info *old = slot_threads[i];
+    if (old == NULL) continue;
+    assert(old->is_done());
+    old->m_cta_info->register_deleted_thread(old);
+    delete old;
+    slot_threads[i] = NULL;
+  }
+  unsigned sm_idx = hw_cta_id * gpu->gpgpu_ctx->func_sim->gpgpu_param_num_shaders + sid;
+  if (ptx_cta_lookup.find(sm_idx) == ptx_cta_lookup.end()) {
+    char buf[512];
+    snprintf(buf, 512, "shared_%u", sid);
+    shared_memory_lookup[sm_idx] = new memory_space_impl<16 * 1024>(buf, 4);
+    snprintf(buf, 512, "sstarr_%u", sid);
+    sstarr_memory_lookup[sm_idx] = new memory_space_impl<16 * 1024>(buf, 4);
+    ptx_cta_lookup[sm_idx] = new ptx_cta_info(sm_idx, gpu->gpgpu_ctx);
+  } else {
+    ptx_cta_lookup[sm_idx]->check_cta_thread_status_and_reset();
+  }
+  if (ptx_warp_lookup.find(hw_warp_id) == ptx_warp_lookup.end())
+    ptx_warp_lookup[hw_warp_id] = new ptx_warp_info();
+}
+
 void ptx_sim_move_thread_to_slot(ptx_thread_info *thd, int sid,
                                  unsigned hw_cta_id, unsigned hw_warp_id,
                                  unsigned hw_tid)
