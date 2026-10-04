@@ -1425,6 +1425,7 @@ uint32_t VulkanRayTracing::registerShaders(char * shaderPath, gl_shader_stage sh
     shader.ID = std::stoi(idInString);
     shader.type = shaderType;
     shader.function_name = (char*)malloc(200 * sizeof(char));
+    shader.ptx_path = strdup(shaderPath);
 
     std::string deviceFunction;
 
@@ -1713,8 +1714,44 @@ void VulkanRayTracing::vkCmdTraceRaysKHR(
 
     printf("gpgpusim: tlas address %p\n", tlas_addr);
             
+    // Per-launch functional/timing selection. Functional launches still compute
+    // every result (memory, images), they only skip the timing model.
+    static unsigned launch_index = 0;            // 0-based, all launches
+    static std::string frame_start_raygen;      // raygen of the first launch
+    static int frame = -1;
+    if (frame_start_raygen.empty()) frame_start_raygen = raygen_shader.function_name;
+    if (frame_start_raygen == raygen_shader.function_name) frame++;
+    int sim_mode = ctx->func_sim->g_ptx_sim_mode;
+    if (!sim_mode) {
+      bool has_reorder = entry->has_opcode(REORDER_THREAD_NV_OP);
+      const char *marker = ctx->func_sim->g_timing_marker;
+      bool marker_on = marker && *marker && strcmp(marker, "none") != 0;
+      bool has_marker = false;
+      if (marker_on) {
+        static std::map<std::string, bool> marker_cache;  // per PTX file
+        std::string path(raygen_shader.ptx_path ? raygen_shader.ptx_path : "");
+        std::map<std::string, bool>::iterator c = marker_cache.find(path);
+        if (c == marker_cache.end()) {
+          std::ifstream in(path.c_str());
+          std::string text((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+          c = marker_cache.insert(std::make_pair(path, text.find(marker) != std::string::npos)).first;
+        }
+        has_marker = c->second;
+      }
+      if ((ctx->func_sim->g_functional_no_reorder && !has_reorder) ||
+          (marker_on && !has_marker) ||
+          (int)launch_index < ctx->func_sim->g_functional_launches ||
+          frame < ctx->func_sim->g_functional_frames)
+        sim_mode = 1;
+    }
+    printf("gpgpusim: launch %u (frame %d) %s -> %s\n", launch_index, frame,
+           raygen_shader.function_name, sim_mode ? "functional" : "timing");
+    fflush(stdout);
+    launch_index++;
+
     struct CUstream_st *stream = 0;
-    stream_operation op(grid, ctx->func_sim->g_ptx_sim_mode, stream);
+    stream_operation op(grid, sim_mode, stream);
     ctx->the_gpgpusim->g_stream_manager->push(op);
 
     //printf("%d\n", descriptors[0][1].address);

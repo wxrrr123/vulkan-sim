@@ -674,6 +674,26 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
       opp, "-gpgpu_ptx_sim_mode", OPT_INT32,
       &(gpgpu_ctx->func_sim->g_ptx_sim_mode),
       "Select between Performance (default) or Functional simulation (1)", "0");
+  option_parser_register(
+      opp, "-vulkan_functional_no_reorder", OPT_INT32,
+      &(gpgpu_ctx->func_sim->g_functional_no_reorder),
+      "Run Vulkan ray-tracing launches whose raygen has no reorder_thread_nv "
+      "functionally (no timing); the others are timed", "0");
+  option_parser_register(
+      opp, "-vulkan_functional_launches", OPT_INT32,
+      &(gpgpu_ctx->func_sim->g_functional_launches),
+      "Run the first N Vulkan ray-tracing launches functionally", "0");
+  option_parser_register(
+      opp, "-vulkan_functional_frames", OPT_INT32,
+      &(gpgpu_ctx->func_sim->g_functional_frames),
+      "Run every Vulkan ray-tracing launch of the first F frames functionally; "
+      "a frame starts at each launch of the first raygen ever launched", "0");
+  option_parser_register(
+      opp, "-vulkan_timing_marker", OPT_CSTR,
+      &(gpgpu_ctx->func_sim->g_timing_marker),
+      "If not 'none': only Vulkan ray-tracing launches whose raygen PTX file "
+      "contains this text are timed, all others run functionally (e.g. a buffer "
+      "name that only the passes of interest use)", "none");
   option_parser_register(opp, "-gpgpu_clock_domains", OPT_CSTR,
                          &gpgpu_clock_domains,
                          "Clock Domain Frequencies in MhZ {<Core Clock>:<ICNT "

@@ -181,6 +181,13 @@ class cuda_sim {
       g_const_name_lookup;  // indexed by hostVar
   int g_ptx_sim_mode;  // if non-zero run functional simulation only (i.e., no
                        // notion of a clock cycle)
+  // Per-launch functional/timing selection for Vulkan ray-tracing launches
+  // (ignored when g_ptx_sim_mode is set, which makes every launch functional):
+  int g_functional_no_reorder;   // launches whose raygen has no reorder_thread_nv
+  int g_functional_launches;     // the first N launches
+  int g_functional_frames;       // every launch of the first F frames
+  char *g_timing_marker;         // if not "none": only launches whose raygen PTX
+                                 // contains this text are timed
   unsigned gpgpu_param_num_shaders;
   class std::map<function_info *, rec_pts> g_rpts;
   bool g_cuda_launch_blocking;

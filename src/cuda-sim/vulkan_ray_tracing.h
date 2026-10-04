@@ -152,6 +152,7 @@ typedef struct shader_stage_info {
     uint32_t ID;
     gl_shader_stage type;
     char* function_name;
+    char* ptx_path;  // the loaded PTX file (used by -vulkan_timing_marker)
 } shader_stage_info;
 
 
