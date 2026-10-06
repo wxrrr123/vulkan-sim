@@ -699,6 +699,12 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
       "If not 'none': only Vulkan ray-tracing launches whose raygen PTX file "
       "contains this text are timed, all others run functionally (e.g. a buffer "
       "name that only the passes of interest use)", "none");
+  option_parser_register(
+      opp, "-vulkan_functional_launch_list", OPT_CSTR,
+      &(gpgpu_ctx->func_sim->g_functional_launch_list),
+      "If not 'none': comma-separated 0-based Vulkan ray-tracing launch indices "
+      "that run functionally (e.g. 0,3,4,8 = Lumen's Gen and Spatial in frames "
+      "0 and 1)", "none");
   option_parser_register(opp, "-gpgpu_clock_domains", OPT_CSTR,
                          &gpgpu_clock_domains,
                          "Clock Domain Frequencies in MhZ {<Core Clock>:<ICNT "

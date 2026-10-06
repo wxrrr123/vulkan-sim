@@ -1739,8 +1739,20 @@ void VulkanRayTracing::vkCmdTraceRaysKHR(
         }
         has_marker = c->second;
       }
+      bool listed = false;
+      const char *list = ctx->func_sim->g_functional_launch_list;
+      if (list && *list && strcmp(list, "none") != 0) {
+        std::string l(list);
+        size_t p = 0;
+        while (p < l.size()) {
+          size_t q = l.find(',', p);
+          if (q == std::string::npos) q = l.size();
+          if (q > p && (unsigned)atoi(l.substr(p, q - p).c_str()) == launch_index) listed = true;
+          p = q + 1;
+        }
+      }
       if ((ctx->func_sim->g_functional_no_reorder && !has_reorder) ||
-          (marker_on && !has_marker) ||
+          (marker_on && !has_marker) || listed ||
           (int)launch_index < ctx->func_sim->g_functional_launches ||
           frame < ctx->func_sim->g_functional_frames)
         sim_mode = 1;

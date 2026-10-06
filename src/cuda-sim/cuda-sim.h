@@ -200,6 +200,8 @@ class cuda_sim {
   int g_functional_frames;       // every launch of the first F frames
   char *g_timing_marker;         // if not "none": only launches whose raygen PTX
                                  // contains this text are timed
+  char *g_functional_launch_list;  // if not "none": comma-separated 0-based
+                                   // launch indices that run functionally
   unsigned gpgpu_param_num_shaders;
   class std::map<function_info *, rec_pts> g_rpts;
   bool g_cuda_launch_blocking;
