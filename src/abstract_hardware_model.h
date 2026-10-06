@@ -364,6 +364,8 @@ typedef struct vulkan_kernel_metadata {
 
 class kernel_info_t {
  public:
+  // Vulkan ray-tracing launch index (0-based, all launches), -1 otherwise
+  int m_vulkan_launch = -1;
   //   kernel_info_t()
   //   {
   //      m_valid=false;

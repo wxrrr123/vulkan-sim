@@ -87,6 +87,12 @@ void exec_shader_core_ctx::create_shd_warp() {
   m_reorder_n_waiting = 0;
   m_tsu_pc = (address_type)-1;
   m_tsu_first_arrival = 0;
+  m_tsu_fill_pending.assign(m_config->max_warps_per_shader, 0);
+  m_tsu_fill_start.assign(m_config->max_warps_per_shader, 0);
+  m_tsu_fill_threads.assign(m_config->max_warps_per_shader, 0);
+  m_tsu_next_lines = 0;
+  m_tsu_words_uid = 0;
+  m_tsu_words = 0;
 }
 
 void shader_core_ctx::create_front_pipeline() {
@@ -846,12 +852,16 @@ void shader_core_stats::print(FILE *fout) const {
           "TSU: suspended_warps=%llu suspended_threads=%llu releases=%llu "
           "release_full=%llu release_timeout=%llu release_drain=%llu "
           "released_threads=%llu pool_max=%llu resumed_warps=%llu "
-          "resumed_threads=%llu wait_cycles=%llu pool_hist=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+          "resumed_threads=%llu wait_cycles=%llu pool_hist=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu "
+          "spill_reqs=%llu fill_reqs=%llu fill_cycles=%llu fill_warp_cycles=%llu "
+          "inject_stall=%llu queue_max=%llu\n",
           tsu_suspended_warps, tsu_suspended_threads, tsu_releases, tsu_release_full,
           tsu_release_timeout, tsu_release_drain, tsu_released_threads, tsu_pool_max,
           tsu_resumed_warps, tsu_resumed_threads, tsu_wait_cycles, tsu_pool_hist[0],
           tsu_pool_hist[1], tsu_pool_hist[2], tsu_pool_hist[3], tsu_pool_hist[4],
-          tsu_pool_hist[5], tsu_pool_hist[6], tsu_pool_hist[7]);
+          tsu_pool_hist[5], tsu_pool_hist[6], tsu_pool_hist[7], tsu_spill_reqs,
+          tsu_fill_reqs, tsu_fill_cycles, tsu_fill_warp_cycles, tsu_inject_stall,
+          tsu_queue_max);
   fprintf(fout,
           "WarpState: ready=%llu sb_alu=%llu sb_mem=%llu sb_rt=%llu rt_full=%llu "
           "reorder_pool=%llu barrier=%llu ibuf_empty=%llu draining=%llu no_work=%llu\n",
@@ -5343,7 +5353,8 @@ void shader_core_ctx::diag_sample_warp_states()
 bool shader_core_ctx::warp_waiting_at_reorder(unsigned warp_id) const
 {
   return m_config->m_rt_reorder_policy > 0 &&
-         m_reorder_state[warp_id] == REORDER_WAITING;
+         (m_reorder_state[warp_id] == REORDER_WAITING ||
+          m_tsu_fill_pending[warp_id] > 0);
 }
 
 void shader_core_ctx::reorder_warp_arrives(unsigned warp_id,
@@ -5503,6 +5514,9 @@ void shader_core_ctx::tsu_cycle()
 {
   unsigned long long now = m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
 
+  // 0. save/restore traffic of earlier cycles
+  tsu_mem_cycle();
+
   // 1. drained waiting warps give up their slot
   if (m_reorder_n_waiting > 0)
     for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
@@ -5607,6 +5621,12 @@ void shader_core_ctx::tsu_suspend(unsigned w, unsigned long long now)
 
   m_stats->tsu_suspended_warps++;
   m_stats->tsu_suspended_threads += n_live;
+
+  if (n_live > 0 && tsu_words() > 0) {
+    unsigned g = m_tsu_next_lines++;
+    m_tsu_pool_lines.push_back(g);
+    tsu_enqueue_lines(g, true, -1);
+  }
 }
 
 void shader_core_ctx::tsu_release(unsigned reason)
@@ -5628,8 +5648,17 @@ void shader_core_ctx::tsu_release(unsigned reason)
     unsigned e = std::min(n, i + m_config->warp_size);
     m_tsu_resume.push_back(std::vector<tsu_entry>(m_tsu_pool.begin() + i,
                                                   m_tsu_pool.begin() + e));
+    // regrouping never makes more warps than went in: each regrouped warp
+    // reads the lines one suspended warp wrote
+    unsigned g = 0;
+    if (!m_tsu_pool_lines.empty()) {
+      g = m_tsu_pool_lines.front();
+      m_tsu_pool_lines.pop_front();
+    }
+    m_tsu_resume_lines.push_back(g);
   }
   m_tsu_pool.clear();
+  m_tsu_pool_lines.clear();
 }
 
 bool shader_core_ctx::tsu_dispatch_one(unsigned long long now)
@@ -5648,6 +5677,8 @@ bool shader_core_ctx::tsu_dispatch_one(unsigned long long now)
 
   std::vector<tsu_entry> group = m_tsu_resume.front();
   m_tsu_resume.pop_front();
+  unsigned lines = m_tsu_resume_lines.front();
+  m_tsu_resume_lines.pop_front();
   unsigned w = s;  // one-warp CTAs: hardware CTA slot i is warp slot i
   unsigned start = w * m_config->warp_size;
   kernel.inc_running();
@@ -5681,6 +5712,104 @@ bool shader_core_ctx::tsu_dispatch_one(unsigned long long now)
   ++m_active_warps;
   m_stats->tsu_resumed_warps++;
   m_stats->tsu_resumed_threads += group.size();
+
+  if (tsu_words() > 0) {
+    m_tsu_fill_pending[w] = 4 * tsu_words();
+    m_tsu_fill_start[w] = now;
+    m_tsu_fill_threads[w] = group.size();
+    tsu_enqueue_lines(lines, false, w);
+  }
+  return true;
+}
+
+unsigned shader_core_ctx::tsu_words()
+{
+  if (m_kernel == NULL) return m_tsu_words;
+  if (m_kernel->get_uid() == m_tsu_words_uid) return m_tsu_words;
+  m_tsu_words_uid = m_kernel->get_uid();
+  m_tsu_words = 0;
+  const char *spec = m_config->m_rt_tsu_spill_words_str;
+  if (spec == NULL || !*spec) return 0;
+  if (m_kernel->m_vulkan_launch < 0) return 0;
+  std::string s(spec);
+  size_t p = 0;
+  while (p < s.size()) {
+    size_t c = s.find(',', p);
+    std::string item = s.substr(p, c == std::string::npos ? std::string::npos : c - p);
+    size_t eq = item.find('=');
+    if (eq != std::string::npos && atoi(item.c_str()) == m_kernel->m_vulkan_launch)
+      m_tsu_words = atoi(item.c_str() + eq + 1);
+    if (c == std::string::npos) break;
+    p = c + 1;
+  }
+  return m_tsu_words;
+}
+
+// SoA save area per SM, outside any Vulkan buffer: word w of line group g at
+// base + (w * 65536 + g % 65536) * 128.
+new_addr_type shader_core_ctx::tsu_line_addr(unsigned group, unsigned word) const
+{
+  new_addr_type base = 0x100000000000ULL + (new_addr_type)m_sid * 0x40000000ULL;
+  return base + ((new_addr_type)word * 65536 + (group % 65536)) * 128;
+}
+
+void shader_core_ctx::tsu_enqueue_lines(unsigned group, bool write, int slot)
+{
+  for (unsigned word = 0; word < tsu_words(); word++)
+    for (unsigned s = 0; s < 4; s++) {
+      tsu_req r = {tsu_line_addr(group, word) + 32 * s, s, write, slot};
+      m_tsu_mem_q.push_back(r);
+    }
+  if (m_tsu_mem_q.size() > m_stats->tsu_queue_max)
+    m_stats->tsu_queue_max = m_tsu_mem_q.size();
+}
+
+// One 32 B request per cycle into the interconnect, in order.
+void shader_core_ctx::tsu_mem_cycle()
+{
+  if (m_tsu_mem_q.empty()) return;
+  const tsu_req &r = m_tsu_mem_q.front();
+  unsigned size = 32;
+  if (m_icnt->full(r.write ? size + WRITE_PACKET_SIZE : READ_PACKET_SIZE, r.write)) {
+    m_stats->tsu_inject_stall++;
+    return;
+  }
+  active_mask_t all;
+  all.set();
+  mem_access_byte_mask_t bytes;
+  for (unsigned b = 32 * r.sector; b < 32 * (r.sector + 1); b++) bytes.set(b);
+  mem_access_sector_mask_t sectors;
+  sectors.set(r.sector);
+  mem_access_t access(r.write ? GLOBAL_ACC_W : GLOBAL_ACC_R, r.addr, size, r.write,
+                      all, bytes, sectors, m_config->gpgpu_ctx);
+  mem_fetch *mf = new mem_fetch(access, NULL,
+                                r.write ? WRITE_PACKET_SIZE : READ_PACKET_SIZE, -1,
+                                m_sid, m_tpc, m_memory_config,
+                                m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+  m_tsu_inflight[mf] = r.slot;
+  if (r.write) m_stats->tsu_spill_reqs++;
+  else m_stats->tsu_fill_reqs++;
+  m_icnt->push(mf);
+  m_tsu_mem_q.pop_front();
+}
+
+bool shader_core_ctx::tsu_accept_response(mem_fetch *mf)
+{
+  if (m_tsu_inflight.empty()) return false;
+  std::map<mem_fetch *, int>::iterator it = m_tsu_inflight.find(mf);
+  if (it == m_tsu_inflight.end()) return false;
+  int w = it->second;
+  m_tsu_inflight.erase(it);
+  if (w >= 0) {
+    assert(m_tsu_fill_pending[w] > 0);
+    if (--m_tsu_fill_pending[w] == 0) {
+      unsigned long long d =
+          m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle - m_tsu_fill_start[w];
+      m_stats->tsu_fill_warp_cycles += d;
+      m_stats->tsu_fill_cycles += d * m_tsu_fill_threads[w];
+    }
+  }
+  delete mf;
   return true;
 }
 
@@ -5714,6 +5843,8 @@ bool shader_core_ctx::ldst_unit_response_buffer_full() const {
 }
 
 void shader_core_ctx::accept_ldst_unit_response(mem_fetch *mf) {
+  if (tsu_accept_response(mf)) return;
+
   // Go to rt_unit
   if (mf->israytrace()) m_rt_unit->fill(mf);
   

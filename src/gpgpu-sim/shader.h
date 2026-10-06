@@ -1794,6 +1794,10 @@ class shader_core_config : public core_config {
   // Policy 3 (TSU-style pool): release once this many threads wait (or the
   // timeout, or no warp can still arrive). Waiting warps give up their slot.
   unsigned m_rt_tsu_pool_threads;
+  // Policy 3: 32-bit words per thread saved when a warp enters the pool and
+  // restored when a regrouped warp resumes, per Vulkan launch index ("1=31,2=26").
+  // Empty: no traffic (M1).
+  char *m_rt_tsu_spill_words_str;
   char * m_rt_coherence_engine_config_str;
   ray_coherence_config m_rt_coherence_engine_config;
   bool bypassL0Complet;
@@ -1909,6 +1913,12 @@ struct shader_core_stats_pod {
   unsigned long long tsu_resumed_warps;        // regrouped warps dispatched into a slot
   unsigned long long tsu_resumed_threads;      // threads in them
   unsigned long long tsu_wait_cycles;          // arrival -> resume dispatch, summed over threads
+  unsigned long long tsu_spill_reqs;           // 32 B store requests sent (4 per saved word per warp)
+  unsigned long long tsu_fill_reqs;            // 32 B load requests sent
+  unsigned long long tsu_fill_cycles;          // resume dispatch -> all loads back, summed over threads
+  unsigned long long tsu_fill_warp_cycles;     // same, summed over resumed warps
+  unsigned long long tsu_inject_stall;         // cycles the TSU queue could not inject (interconnect full)
+  unsigned long long tsu_queue_max;            // longest TSU request queue
   // Diagnostic: per SM-cycle, per warp slot state (sampled just before issue()).
   // 0 ready, 1 scoreboard (ALU/other), 2 scoreboard (memory), 3 scoreboard (RT),
   // 4 ready but next inst is RT and the RT unit is full, 5 parked in reorder pool,
@@ -2634,8 +2644,33 @@ class shader_core_ctx : public core_t {
   void tsu_release(unsigned reason);  // 0 full, 1 timeout, 2 drain
   bool tsu_dispatch_one(unsigned long long now);
 
+  // M2 traffic: one 128 B line per saved word, sent as four 32 B sector requests
+  // straight to the interconnect (L1 is write-through, no allocate: the lines
+  // live in L2). Lines of a suspended warp are read back by one regrouped warp.
+  struct tsu_req {
+    new_addr_type addr;
+    unsigned sector;
+    bool write;
+    int slot;  // warp slot waiting for this load; -1 for stores
+  };
+  std::deque<tsu_req> m_tsu_mem_q;
+  std::map<mem_fetch *, int> m_tsu_inflight;  // TSU requests in the memory system
+  std::vector<unsigned> m_tsu_fill_pending;   // per slot: loads not back yet
+  std::vector<unsigned long long> m_tsu_fill_start;
+  std::vector<unsigned> m_tsu_fill_threads;
+  std::deque<unsigned> m_tsu_pool_lines;      // line group of each suspended warp
+  std::deque<unsigned> m_tsu_resume_lines;    // line group each regrouped warp reads
+  unsigned m_tsu_next_lines;
+  unsigned m_tsu_words_uid;  // kernel uid m_tsu_words belongs to (0 = none)
+  unsigned m_tsu_words;
+  unsigned tsu_words();
+  new_addr_type tsu_line_addr(unsigned group, unsigned word) const;
+  void tsu_enqueue_lines(unsigned group, bool write, int slot);
+  void tsu_mem_cycle();
+
  public:
   bool tsu_pending() const { return !m_tsu_pool.empty() || !m_tsu_resume.empty(); }
+  bool tsu_accept_response(mem_fetch *mf);
 
  protected:
   ifetch_buffer_t m_inst_fetch_buffer;

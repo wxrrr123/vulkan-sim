@@ -276,6 +276,14 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "policy 3: release the per-SM pool once it holds this many threads",
       "512");
   option_parser_register(
+      opp, "-gpgpu_rt_tsu_spill_words", OPT_CSTR, &m_rt_tsu_spill_words_str,
+      "policy 3: live 32-bit words per thread saved/restored at the reorder point, "
+      "per Vulkan launch as <launch index>=<words>,... (index as printed by "
+      "'gpgpusim: launch i'; shader numbering differs between runs, launch order does not); "
+      "each word is one coalesced 128 B store (warp enters the pool) and one 128 B "
+      "load (regrouped warp resumes; it waits for all loads). Empty = no traffic",
+      "");
+  option_parser_register(
       opp, "-gpgpu_rt_reorder_timeout", OPT_UINT32, &m_rt_reorder_timeout,
       "cycles after the first arrival before the reorder pool is force-released "
       "(0=never)",

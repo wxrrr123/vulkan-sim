@@ -1760,6 +1760,7 @@ void VulkanRayTracing::vkCmdTraceRaysKHR(
     printf("gpgpusim: launch %u (frame %d) %s -> %s\n", launch_index, frame,
            raygen_shader.function_name, sim_mode ? "functional" : "timing");
     fflush(stdout);
+    grid->m_vulkan_launch = (int)launch_index;
     launch_index++;
 
     struct CUstream_st *stream = 0;
