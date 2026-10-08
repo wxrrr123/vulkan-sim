@@ -7,11 +7,34 @@
 
 | 元件 | 版本 | 位置 |
 |---|---|---|
-| Vulkan-Sim | fork `wxrrr123/vulkan-sim` 分支 `upstream-port`，模擬器程式碼 commit `0ecb3287`（本文件所在的 commit 只多了文件與 config） | container `/home/vulkan-sim-upstream11/vulkan-sim`（build v11） |
+| Vulkan-Sim | fork `wxrrr123/vulkan-sim` 分支 `upstream-port`。**2026-10-08 起標準 build 是 `55b6a7ac`**（＝凍結的 `0ecb3287`＋記憶體對照表修正，見第 1.1 節）；之前的凍結 run 用 `0ecb3287`。之後的 commit 只多了文件 | container `/home/vulkan-sim-upstream12/vulkan-sim`（build v12）；修正前 `/home/vulkan-sim-upstream11/vulkan-sim`（build v11） |
 | Mesa（lavapipe + Vulkan-Sim 介面） | fork `wxrrr123/mesa-vulkan-sim` 分支 `upstream-port`，commit `c98094ac72f`（c98094ac72f4cf06b6e7cad9db46848e6790719e） | container `/home/vulkan-sim-upstream/mesa-vulkan-sim` |
 | Lumen | `12610a7`（12610a779e1d72c23f5a196df9e8eadd46015813，修正 spatial-neighbor seed 預設值） | host `~/AQB8/Lumen`；container binary `/root/lumen-build/Lumen` |
 | Embree | 3.12.2 | — |
 | CUDA toolkit（ptxas，只用來算暫存器數） | 11.1 | `/usr/local/cuda-11.1` |
+
+### 1.1 記憶體對照表修正（`55b6a7ac`，2026-10-08）
+
+**修改內容與原因**：Vulkan-Sim 原本在 `bind_vulkan_buffer`（`src/cuda-sim/memory.h`／`memory.cc`）裡，每個綁定的 buffer／image
+每 16 位元組存一個 `std::map` 節點，主機記憶體約為綁定大小的 4 倍；704×704 時因此被系統 OOM 砍掉（29.8 GB）。改成每個 buffer
+存一個區間（起點、終點、host 位址），後綁定的覆蓋重疊部分，和原本的行為相同；`devPtr` 沒對齊 16 位元組的少數綁定仍用舊的逐塊表。
+這是 Vulkan-Sim 原本的記憶體問題，和重排無關，不改變任何模擬行為。
+
+**驗證**（1 SM、128²，A 與 D）：
+
+| 項目 | 結果 |
+|---|---|
+| 輸出（out_0.exr、截圖、3 個 image dump） | 和修改前逐位元相同 |
+| 每個 kernel 的指令數 | 完全相同 |
+| 新舊兩張表逐次查詢比對（檢查版：全程同時查兩張表，不一致就中止） | A 至少 65,011,712 次、D 至少 71,303,168 次，0 次不一致 |
+| 單元測試（隨機查詢，含重疊綁定、沒對齊） | 3,584,000 次，0 次不一致 |
+| 主機記憶體峰值（A） | 4,930 MB → 1,400 MB（D 修正後 1,424 MB） |
+
+cycles 無法逐 cycle 相同：Vulkan-Sim 直接拿 host 指標當 GPU 位址，每次執行 ASLR 讓位址不同，cache／DRAM 的對應跟著變；
+同一個沒改過的 build 重跑，各 pass 就差 +0.04%～+0.34%，修改前後的差距（−0.23%～+0.36%）在同一範圍內。容器不允許關閉 ASLR
+（`setarch -R` 被拒絕），所以用逐次查詢比對直接證明兩張表行為相同。
+
+**修正前的凍結結果（`0ecb3287`）可以和修正後（`55b6a7ac`）的結果直接比較**，不需要重跑。
 
 ## 2. GPU 模型
 
