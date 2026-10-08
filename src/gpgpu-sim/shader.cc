@@ -32,7 +32,10 @@
 #include <limits.h>
 #include <string.h>
 #include <algorithm>
+#include <bitset>
+#include <fstream>
 #include "../../libcuda/gpgpu_context.h"
+#include "../cuda-sim/ptx_ir.h"
 #include "../cuda-sim/cuda-sim.h"
 #include "../cuda-sim/ptx-stats.h"
 #include "../cuda-sim/ptx_sim.h"
@@ -80,6 +83,17 @@ void exec_shader_core_ctx::create_shd_warp() {
   for (unsigned k = 0; k < m_config->max_warps_per_shader; ++k) {
     m_warp[k] = new shd_warp_t(this, m_config->warp_size);
   }
+  m_dynreg_held.assign(m_config->max_warps_per_shader, 0);
+  m_dynreg_resident.assign(m_config->max_warps_per_shader, false);
+  m_dynreg_blocked.assign(m_config->max_warps_per_shader, false);
+  m_dynreg_callsite.assign(m_config->max_warps_per_shader, (address_type)-1);
+  m_dynreg_used = 0;
+  m_dynreg_entry = NULL;
+  m_dynreg_alloc = m_dynreg_start = m_dynreg_peak = 0;
+  m_dynreg_stuck = 0;
+  if (m_config->m_dynreg)
+    assert(m_config->m_rt_reorder_policy == 0 && !m_config->gpgpu_concurrent_kernel_sm &&
+           m_config->model == POST_DOMINATOR);
   m_reorder_state.assign(m_config->max_warps_per_shader, REORDER_NOT_ARRIVED);
   m_reorder_arrival_cycle.assign(m_config->max_warps_per_shader, 0);
   m_reorder_next_pc.assign(m_config->max_warps_per_shader, (address_type)-1);
@@ -577,6 +591,7 @@ void shader_core_ctx::init_warps(unsigned cta_id, unsigned start_thread,
 
     m_warp[i]->init(start_pc, cta_id, i, active_threads, m_dynamic_warp_id);
     m_reorder_state[i] = REORDER_NOT_ARRIVED;
+    if (m_config->m_dynreg) dynreg_admit(i);
     ++m_dynamic_warp_id;
     m_not_completed += n_active;
     ++m_active_warps;
@@ -864,9 +879,16 @@ void shader_core_stats::print(FILE *fout) const {
           tsu_queue_max);
   fprintf(fout,
           "WarpState: ready=%llu sb_alu=%llu sb_mem=%llu sb_rt=%llu rt_full=%llu "
-          "reorder_pool=%llu barrier=%llu ibuf_empty=%llu draining=%llu no_work=%llu\n",
+          "reorder_pool=%llu barrier=%llu ibuf_empty=%llu draining=%llu no_work=%llu "
+          "reg_wait=%llu\n",
           warp_state[0], warp_state[1], warp_state[2], warp_state[3], warp_state[4],
-          warp_state[5], warp_state[6], warp_state[7], warp_state[8], warp_state[9]);
+          warp_state[5], warp_state[6], warp_state[7], warp_state[8], warp_state[9],
+          warp_state[10]);
+  fprintf(fout,
+          "DynReg: grows=%llu denied=%llu denied_reserve=%llu stall_cycles=%llu "
+          "admit_blocked=%llu used_sum=%llu used_max=%llu over_peak=%llu\n",
+          dynreg_grows, dynreg_denied, dynreg_denied_reserve, dynreg_stall_cycles,
+          dynreg_admit_blocked, dynreg_used_sum, dynreg_used_max, dynreg_over_peak);
   fprintf(fout, "RTUnitDiag: cycles=%llu busy=%llu full=%llu warp_cycles=%llu\n",
           rt_diag_cycles, rt_diag_busy, rt_diag_full, rt_diag_warp_cycles);
   fprintf(fout,
@@ -1254,6 +1276,7 @@ void shader_core_ctx::fetch() {
           if (did_exit) {
             m_warp[warp_id]->set_done_exit();
           }
+          if (m_config->m_dynreg) dynreg_release(warp_id);
           if(m_gpu->simd_model() == AWARE_RECONVERGENCE) {
             update_table_stats(warp_id);
           }
@@ -1673,6 +1696,11 @@ void scheduler_unit::cycle() {
             SCHED_DPRINTF(
                 "Warp (warp_id %u, dynamic_warp_id %u) passes scoreboard\n",
                 (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id());
+            // Dynamic registers: the warp must hold the registers live at
+            // this instruction before it issues; otherwise it waits.
+            if (m_shader->m_config->m_dynreg &&
+                !m_shader->dynreg_acquire(warp_id, pc))
+              break;
             ready_inst = true;
 
             const active_mask_t &active_mask =
@@ -4757,9 +4785,11 @@ unsigned int shader_core_config::max_cta(const kernel_info_t &k) const {
 
   // Limit by register count, rounded up to multiple of 4.
   unsigned int result_regs = (unsigned)-1;
-  if (kernel_info->regs > 0)
-    result_regs = gpgpu_shader_registers /
-                  (padded_cta_size * ((kernel_info->regs + 3) & ~3));
+  // dynreg: admission by free registers, optionally capped at the static
+  // count for -gpgpu_dynreg_cap_registers
+  unsigned regfile = m_dynreg ? m_dynreg_cap_registers : gpgpu_shader_registers;
+  if (kernel_info->regs > 0 && regfile > 0)
+    result_regs = regfile / (padded_cta_size * ((kernel_info->regs + 3) & ~3));
 
   // Limit by CTA
   unsigned int result_cta = max_cta_per_core;
@@ -5310,6 +5340,7 @@ bool rt_unit::diag_full() const { return n_warps >= m_config->m_rt_max_warps; }
 // Diagnostic only: classify every warp slot once per cycle, just before issue().
 void shader_core_ctx::diag_sample_warp_states()
 {
+  unsigned n_ready = 0, n_regwait = 0, n_resident = 0;
   for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
   {
     shd_warp_t *wp = m_warp[w];
@@ -5337,16 +5368,43 @@ void shader_core_ctx::diag_sample_warp_states()
       if (pI == NULL || pI != get_next_inst(w, pc))
       {
         m_stats->warp_state[7]++;
+        n_resident++;
         continue;
       }
       unsigned kinds = m_scoreboard->collisionKinds(w, pI);
       if (kinds & 4) st = 3;
       else if (kinds & 2) st = 2;
       else if (kinds & 1) st = 1;
+      else if (m_config->m_dynreg && m_dynreg_blocked[w]) st = 10;
       else if (pI && pI->op == RT_CORE_OP && m_rt_unit && m_rt_unit->diag_full()) st = 4;
       else st = 0;
     }
     m_stats->warp_state[st]++;
+    n_ready += (st == 0);
+    n_regwait += (st == 10);
+    n_resident += (st != 9);
+  }
+  if (m_config->m_dynreg) {
+    if (n_ready == 0 && n_regwait > 0) m_stats->dynreg_stall_cycles++;
+    m_stats->dynreg_used_sum += m_dynreg_used;
+    // Every resident warp waits for registers: none can issue, so none
+    // releases any; the oldest-warp reserve is meant to make this impossible.
+    if (n_regwait > 0 && n_regwait == n_resident) {
+      if (++m_dynreg_stuck >= m_config->m_dynreg_deadlock_cycles) {
+        printf("GPGPU-Sim dynreg: DEADLOCK on SM %u: %u resident warps wait for "
+               "registers for %llu cycles; used %llu of %u, peak %u\n",
+               m_sid, n_regwait, m_dynreg_stuck, m_dynreg_used,
+               m_config->gpgpu_shader_registers, m_dynreg_peak);
+        for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
+          if (m_dynreg_resident[w])
+            printf("  warp %u (dynamic id %u): holds %u\n", w,
+                   m_warp[w]->get_dynamic_warp_id(), m_dynreg_held[w]);
+        fflush(stdout);
+        abort();
+      }
+    } else {
+      m_dynreg_stuck = 0;
+    }
   }
 }
 
@@ -6652,4 +6710,293 @@ void exec_shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst,
       cflog_update_thread_pc(m_sid, tid, pc);
     }
   }
+}
+
+/* Dynamic register allocation model (-gpgpu_dynreg).
+ *
+ * A reimplementation of the idea in Jeon et al., "GPU Register File
+ * Virtualization" (MICRO 2015), at the level of register counts: no rename
+ * table, no physical subarrays. A warp holds the registers live at the
+ * instruction it issues (per-thread count rounded up to -gpgpu_dynreg_gran,
+ * times the warp size) out of the SM's -gpgpu_shader_registers. Live counts
+ * come from the ptxas allocation of the same PTX the simulator runs
+ * (scripts/generate_rt_livetable.py: nvdisasm life ranges per SASS
+ * instruction, mapped back to PTX lines through the ELF line table; a PTX line
+ * takes the largest count of its SASS instructions; a line without SASS
+ * inherits the previous line's count).
+ *
+ * - While a warp runs a hit/miss shader called from raygen, it holds the
+ *   raygen registers live at the call plus the callee's live registers.
+ * - -gpgpu_dynreg_stack 1: a diverged warp also keeps the registers live
+ *   where its other SIMT stack entries resume (union of the live sets): the
+ *   inactive threads' values must survive.
+ * - Before issuing, a warp grows to what the instruction needs, or shrinks to
+ *   it (registers return to the pool at once). Growth is granted only if the
+ *   oldest resident warp can afterwards still grow to the kernel's peak (its
+ *   ptxas count plus one granule for a callee); the oldest warp itself is
+ *   granted whenever the registers are free.
+ * - A new CTA starts within the warp slot limit, and only if the free
+ *   registers cover the oldest warp's growth to the peak plus the new warps'
+ *   starting registers, or -gpgpu_dynreg_alpha times their peak if that is
+ *   more (alpha 0: naive admission). -gpgpu_dynreg_cap_registers also caps
+ *   the CTAs per SM at the static count for that register file size.
+ * - If every resident warp waits for registers for -gpgpu_dynreg_deadlock_cycles,
+ *   the simulation aborts. */
+namespace {
+struct dynreg_pc_info {
+  int live;  // registers per thread live here; -1 = not filled in yet
+  unsigned set;  // index into dynreg_sets
+  const function_info *func;
+  bool is_call;  // call_closest_hit_shader / call_miss_shader / ...
+};
+struct dynreg_file {
+  unsigned alloc;
+  std::map<unsigned, std::pair<unsigned, unsigned> > lines;  // line -> live, set
+};
+std::vector<std::bitset<256> > dynreg_sets;
+std::map<std::string, dynreg_file> dynreg_files;
+std::vector<dynreg_pc_info> dynreg_pcs;
+
+const dynreg_file &dynreg_load(const std::string &ptx) {
+  std::map<std::string, dynreg_file>::iterator it = dynreg_files.find(ptx);
+  if (it != dynreg_files.end()) return it->second;
+  std::string path = ptx + "live";
+  if (!std::ifstream(path.c_str()).good()) {
+    const char *root = getenv("GPGPUSIM_ROOT");
+    assert(root);
+    std::string cmd = std::string("python3 ") + root +
+                      "/scripts/generate_rt_livetable.py " + ptx;
+    printf("GPGPU-Sim dynreg: %s\n", cmd.c_str());
+    fflush(stdout);
+    if (system(cmd.c_str()) != 0) {
+      printf("GPGPU-Sim dynreg: ERROR generating %s\n", path.c_str());
+      abort();
+    }
+  }
+  std::ifstream in(path.c_str());
+  dynreg_file f;
+  std::string word;
+  in >> word >> f.alloc;
+  assert(word == "alloc");
+  std::getline(in, word);
+  unsigned line, live;
+  std::string hex;
+  while (in >> line >> live >> hex) {
+    std::bitset<256> bits;
+    for (unsigned i = 0; i < hex.size(); i++) {
+      unsigned nib = std::stoul(hex.substr(hex.size() - 1 - i, 1), NULL, 16);
+      for (unsigned b = 0; b < 4 && 4 * i + b < 256; b++)
+        if (nib & (1u << b)) bits.set(4 * i + b);
+    }
+    f.lines[line] = std::make_pair(live, (unsigned)dynreg_sets.size());
+    dynreg_sets.push_back(bits);
+  }
+  printf("GPGPU-Sim dynreg: %s: alloc %u, %zu PTX lines\n", path.c_str(),
+         f.alloc, f.lines.size());
+  return dynreg_files[ptx] = f;
+}
+
+// Fill in every PC of function f.
+void dynreg_fill(const function_info *f) {
+  const std::list<ptx_instruction *> &insts = f->get_instructions();
+  const ptx_instruction *first = NULL;
+  for (const ptx_instruction *pI : insts)
+    if (!pI->is_label()) {
+      first = pI;
+      break;
+    }
+  assert(first);
+  const dynreg_file &file = dynreg_load(first->source_file());
+  int live = -1;
+  unsigned set = 0;
+  std::vector<const ptx_instruction *> before_first;  // no mapped line yet
+  for (const ptx_instruction *pI : insts) {
+    if (pI->is_label()) continue;
+    std::map<unsigned, std::pair<unsigned, unsigned> >::const_iterator l =
+        file.lines.find(pI->source_line());
+    if (l != file.lines.end()) {
+      live = l->second.first;
+      set = l->second.second;
+    }
+    if (live < 0) {
+      before_first.push_back(pI);
+      continue;
+    }
+    // instructions before the first mapped line take its count
+    std::vector<const ptx_instruction *> todo(before_first);
+    before_first.clear();
+    todo.push_back(pI);
+    for (const ptx_instruction *p : todo) {
+      addr_t pc = p->get_PC();
+      if (pc >= dynreg_pcs.size())
+        dynreg_pcs.resize(pc + 1, dynreg_pc_info{-1, 0, NULL, false});
+      int op = p->get_opcode();
+      dynreg_pcs[pc] = dynreg_pc_info{
+          live, set, f,
+          op == CALL_MISS_SHADER_OP || op == CALL_CLOSEST_HIT_SHADER_OP ||
+              op == CALL_INTERSECTION_SHADER_OP || op == CALL_ANYHIT_SHADER_OP};
+    }
+  }
+  if (!before_first.empty()) {  // no line of f has SASS: use the allocation
+    for (const ptx_instruction *p : before_first) {
+      addr_t pc = p->get_PC();
+      if (pc >= dynreg_pcs.size())
+        dynreg_pcs.resize(pc + 1, dynreg_pc_info{-1, 0, NULL, false});
+      dynreg_sets.push_back(std::bitset<256>());
+      dynreg_pcs[pc] = dynreg_pc_info{(int)file.alloc,
+                                      (unsigned)dynreg_sets.size() - 1, f,
+                                      false};
+    }
+  }
+}
+
+const dynreg_pc_info &dynreg_lookup(gpgpu_context *ctx, address_type pc) {
+  if (pc >= dynreg_pcs.size() || dynreg_pcs[pc].live < 0) {
+    std::map<unsigned, function_info *>::iterator f =
+        ctx->func_sim->g_pc_to_finfo.find(pc);
+    assert(f != ctx->func_sim->g_pc_to_finfo.end());
+    dynreg_fill(f->second);
+  }
+  assert(pc < dynreg_pcs.size() && dynreg_pcs[pc].live >= 0);
+  return dynreg_pcs[pc];
+}
+}  // namespace
+
+// Registers per thread warp w needs to issue the instruction at pc.
+unsigned shader_core_ctx::dynreg_need(unsigned w, address_type pc) {
+  gpgpu_context *ctx = m_config->gpgpu_ctx;
+  std::vector<address_type> pcs(1, pc);
+  if (m_config->m_dynreg_stack) m_simt_stack[w]->get_pcs(pcs);
+  unsigned rg = 0, callee = 0;
+  bool in_callee = false;
+  std::bitset<256> set;
+  for (address_type p : pcs) {
+    if (p == (address_type)-1) continue;
+    const dynreg_pc_info &d = dynreg_lookup(ctx, p);
+    if (d.func == m_dynreg_entry) {
+      rg = std::max(rg, (unsigned)d.live);
+      set |= dynreg_sets[d.set];
+    } else {
+      callee = std::max(callee, (unsigned)d.live);
+      in_callee = true;
+    }
+  }
+  if (in_callee && m_dynreg_callsite[w] != (address_type)-1) {
+    const dynreg_pc_info &d = dynreg_lookup(ctx, m_dynreg_callsite[w]);
+    rg = std::max(rg, (unsigned)d.live);
+    if (m_config->m_dynreg_stack) set |= dynreg_sets[d.set];
+  }
+  if (m_config->m_dynreg_stack) rg = std::max(rg, (unsigned)set.count());
+  rg = std::min(rg, m_dynreg_alloc);
+  unsigned g = m_config->m_dynreg_gran;
+  unsigned need = (rg + callee + g - 1) / g * g;
+  if (need > m_dynreg_peak) m_stats->dynreg_over_peak++;
+  return need;
+}
+
+int shader_core_ctx::dynreg_oldest() const {
+  int oldest = -1;
+  for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
+    if (m_dynreg_resident[w] &&
+        (oldest < 0 || m_warp[w]->get_dynamic_warp_id() <
+                           m_warp[oldest]->get_dynamic_warp_id()))
+      oldest = w;
+  return oldest;
+}
+
+bool shader_core_ctx::dynreg_acquire(unsigned w, address_type pc) {
+  assert(m_dynreg_resident[w]);
+  unsigned need = dynreg_need(w, pc);
+  unsigned held = m_dynreg_held[w];
+  unsigned ws = m_config->warp_size;
+  bool ok = true;
+  if (need > held) {
+    unsigned long long grow = (unsigned long long)(need - held) * ws;
+    unsigned long long avail = m_config->gpgpu_shader_registers - m_dynreg_used;
+    if (grow > avail) {
+      ok = false;
+    } else {
+      int o = dynreg_oldest();
+      if (o != (int)w) {
+        unsigned short_of_peak =
+            m_dynreg_peak - std::min(m_dynreg_held[o], m_dynreg_peak);
+        if (avail - grow < (unsigned long long)short_of_peak * ws) {
+          ok = false;
+          m_stats->dynreg_denied_reserve++;
+        }
+      }
+    }
+    if (!ok) {
+      m_stats->dynreg_denied++;
+      m_dynreg_blocked[w] = true;
+      return false;
+    }
+    m_stats->dynreg_grows++;
+  }
+  m_dynreg_used = m_dynreg_used - (unsigned long long)held * ws +
+                  (unsigned long long)need * ws;
+  m_dynreg_held[w] = need;
+  m_dynreg_blocked[w] = false;
+  if (m_dynreg_used > m_stats->dynreg_used_max)
+    m_stats->dynreg_used_max = m_dynreg_used;
+  if (dynreg_lookup(m_config->gpgpu_ctx, pc).is_call) m_dynreg_callsite[w] = pc;
+  return true;
+}
+
+bool shader_core_ctx::dynreg_can_admit(kernel_info_t &kernel) {
+  unsigned ws = m_config->warp_size;
+  int o = dynreg_oldest();
+  if (o < 0) {  // the SM is empty: (re)read the kernel
+    m_dynreg_entry = kernel.entry();
+    m_dynreg_alloc = ptx_sim_kernel_info(kernel.entry())->regs;
+    unsigned g = m_config->m_dynreg_gran;
+    m_dynreg_peak = (m_dynreg_alloc + g - 1) / g * g + g;
+    const dynreg_pc_info &d =
+        dynreg_lookup(m_config->gpgpu_ctx, kernel.entry()->get_start_PC());
+    m_dynreg_start =
+        (std::min((unsigned)d.live, m_dynreg_alloc) + g - 1) / g * g;
+    if ((unsigned long long)m_dynreg_peak * ws > m_config->gpgpu_shader_registers) {
+      printf("GPGPU-Sim dynreg: ERROR kernel %s needs up to %u registers per "
+             "thread, more than one warp can get\n",
+             kernel.name().c_str(), m_dynreg_peak);
+      abort();
+    }
+  } else {
+    assert(m_dynreg_entry == kernel.entry());
+  }
+  unsigned warps = (kernel.threads_per_cta() + ws - 1) / ws;
+  unsigned long long add = (unsigned long long)m_dynreg_start * ws * warps;
+  unsigned long long avail = m_config->gpgpu_shader_registers - m_dynreg_used;
+  // the oldest warp (or, on an empty SM, the new CTA's first warp) must still
+  // be able to reach the peak
+  unsigned long long reserve =
+      o < 0 ? (unsigned long long)(m_dynreg_peak - m_dynreg_start) * ws
+            : (unsigned long long)(m_dynreg_peak -
+                                   std::min(m_dynreg_held[o], m_dynreg_peak)) * ws;
+  // and the new warps must have room for alpha times their peak
+  unsigned long long room = std::max(
+      add, (unsigned long long)(m_config->m_dynreg_alpha * m_dynreg_peak * ws *
+                                warps + 0.5));
+  if (avail < reserve + room) {
+    m_stats->dynreg_admit_blocked++;
+    return false;
+  }
+  return true;
+}
+
+void shader_core_ctx::dynreg_admit(unsigned w) {
+  assert(!m_dynreg_resident[w] && m_dynreg_held[w] == 0);
+  m_dynreg_resident[w] = true;
+  m_dynreg_blocked[w] = false;
+  m_dynreg_callsite[w] = (address_type)-1;
+  m_dynreg_held[w] = m_dynreg_start;
+  m_dynreg_used += (unsigned long long)m_dynreg_start * m_config->warp_size;
+  assert(m_dynreg_used <= m_config->gpgpu_shader_registers);
+}
+
+void shader_core_ctx::dynreg_release(unsigned w) {
+  m_dynreg_used -= (unsigned long long)m_dynreg_held[w] * m_config->warp_size;
+  m_dynreg_held[w] = 0;
+  m_dynreg_resident[w] = false;
+  m_dynreg_blocked[w] = false;
 }

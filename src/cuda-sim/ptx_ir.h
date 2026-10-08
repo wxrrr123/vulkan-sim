@@ -1421,6 +1421,9 @@ class function_info {
   void get_reconvergence_pairs(gpgpu_recon_t *recon_points);
 
   unsigned get_function_size() { return m_instructions.size(); }
+  const std::list<ptx_instruction *> &get_instructions() const {
+    return m_instructions;
+  }
   bool has_opcode(int opcode) const {
     for (std::list<ptx_instruction *>::const_iterator i = m_instructions.begin();
          i != m_instructions.end(); i++)

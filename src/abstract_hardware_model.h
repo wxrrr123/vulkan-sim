@@ -1850,6 +1850,8 @@ class simt_stack {
 
     const simt_mask_t &get_active_mask() const;
     void get_pdom_stack_top_info(unsigned *pc, unsigned *rpc) const;
+    // Appends the PC of every stack entry (where each path resumes).
+    void get_pcs(std::vector<address_type> &pcs) const;
     unsigned get_rp() const;
     void print(FILE*fp) const;
      

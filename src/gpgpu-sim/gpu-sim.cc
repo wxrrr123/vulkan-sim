@@ -284,6 +284,39 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "load (regrouped warp resumes; it waits for all loads). Empty = no traffic",
       "");
   option_parser_register(
+      opp, "-gpgpu_dynreg", OPT_UINT32, &m_dynreg,
+      "dynamic register allocation: a warp holds the live registers at its "
+      "current PC (per-PTX-line table from scripts/generate_rt_livetable.py) "
+      "instead of the ptxas count; CTAs are admitted by free registers "
+      "(-gpgpu_shader_registers) and warp slots; 0 = off",
+      "0");
+  option_parser_register(
+      opp, "-gpgpu_dynreg_gran", OPT_UINT32, &m_dynreg_gran,
+      "dynamic register allocation granularity, registers per thread", "8");
+  option_parser_register(
+      opp, "-gpgpu_dynreg_stack", OPT_UINT32, &m_dynreg_stack,
+      "dynamic registers of a diverged warp: 0 = live count at the PC it "
+      "issues from, 1 = also the registers live where its other SIMT stack "
+      "entries resume (union of the live sets)",
+      "1");
+  option_parser_register(
+      opp, "-gpgpu_dynreg_deadlock_cycles", OPT_UINT32,
+      &m_dynreg_deadlock_cycles,
+      "abort when every resident warp of an SM waits for registers this long",
+      "100000");
+  option_parser_register(
+      opp, "-gpgpu_dynreg_alpha", OPT_FLOAT, &m_dynreg_alpha,
+      "dynamic registers: a CTA is admitted only if the free registers cover the "
+      "oldest warp's growth to the peak plus alpha times the new warps' peak "
+      "(at least their starting registers); 0 = naive admission",
+      "0");
+  option_parser_register(
+      opp, "-gpgpu_dynreg_cap_registers", OPT_UINT32, &m_dynreg_cap_registers,
+      "dynamic registers: cap the CTAs per SM at what a static allocation gets "
+      "with this many registers per SM (e.g. 65536 with a smaller "
+      "-gpgpu_shader_registers); 0 = no cap",
+      "0");
+  option_parser_register(
       opp, "-gpgpu_rt_reorder_timeout", OPT_UINT32, &m_rt_reorder_timeout,
       "cycles after the first arrival before the reorder pool is force-released "
       "(0=never)",
@@ -1680,7 +1713,8 @@ bool shader_core_ctx::can_issue_1block(kernel_info_t &kernel) {
 
     return occupy_shader_resource_1block(kernel, false);
   } else {
-    return (get_n_active_cta() < m_config->max_cta(kernel));
+    if (get_n_active_cta() >= m_config->max_cta(kernel)) return false;
+    return !m_config->m_dynreg || dynreg_can_admit(kernel);
   }
 }
 

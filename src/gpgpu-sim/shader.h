@@ -1798,6 +1798,14 @@ class shader_core_config : public core_config {
   // restored when a regrouped warp resumes, per Vulkan launch index ("1=31,2=26").
   // Empty: no traffic (M1).
   char *m_rt_tsu_spill_words_str;
+  // Dynamic register allocation model, see shader_core_ctx::dynreg_acquire.
+  unsigned m_dynreg;          // 0 = static: ptxas count for the warp's lifetime
+  unsigned m_dynreg_gran;     // allocation granularity, registers per thread
+  unsigned m_dynreg_stack;    // 0 = live count at the warp's PC only,
+                              // 1 = union over every PC on its SIMT stack
+  unsigned m_dynreg_deadlock_cycles;
+  float m_dynreg_alpha;             // admission headroom, fraction of a warp's peak
+  unsigned m_dynreg_cap_registers;  // warp cap: static CTAs/SM with this many registers
   char * m_rt_coherence_engine_config_str;
   ray_coherence_config m_rt_coherence_engine_config;
   bool bypassL0Complet;
@@ -1923,8 +1931,17 @@ struct shader_core_stats_pod {
   // 0 ready, 1 scoreboard (ALU/other), 2 scoreboard (memory), 3 scoreboard (RT),
   // 4 ready but next inst is RT and the RT unit is full, 5 parked in reorder pool,
   // 6 barrier/membar/atomic wait, 7 ibuffer empty, 8 functionally done (draining),
-  // 9 no work (slot empty/exited)
-  unsigned long long warp_state[10];
+  // 9 no work (slot empty/exited), 10 ready but waiting for registers (dynreg)
+  unsigned long long warp_state[11];
+  // Dynamic register allocation (cumulative over all SMs and kernels).
+  unsigned long long dynreg_grows;          // grants that gave a warp more registers
+  unsigned long long dynreg_denied;         // issue attempts refused for lack of registers
+  unsigned long long dynreg_denied_reserve; // ... only because of the oldest-warp reserve
+  unsigned long long dynreg_stall_cycles;   // SM cycles: no warp ready, >= 1 waiting for registers
+  unsigned long long dynreg_admit_blocked;  // CTA starts refused for lack of registers (slot free)
+  unsigned long long dynreg_used_sum;       // allocated registers summed over SM cycles
+  unsigned long long dynreg_used_max;       // most registers allocated on one SM
+  unsigned long long dynreg_over_peak;      // warp needs above the reserved peak (should be 0)
   // Diagnostic: RT unit occupancy, L1D accesses by source
   unsigned long long rt_diag_cycles, rt_diag_busy, rt_diag_full, rt_diag_warp_cycles;
   unsigned long long l1d_ldst_acc, l1d_ldst_hit, l1d_ldst_hitres, l1d_rt_acc, l1d_rt_hit, l1d_rt_hitres;
@@ -2284,6 +2301,9 @@ class shader_core_ctx : public core_t {
   // Thread reorder unit (reorder_thread_nv), see shader.cc.
   bool warp_waiting_at_reorder(unsigned warp_id) const;
   void diag_sample_warp_states();
+  // Dynamic register allocation (-gpgpu_dynreg), see shader.cc.
+  bool dynreg_acquire(unsigned warp_id, address_type pc);
+  bool dynreg_can_admit(kernel_info_t &kernel);
   void reorder_warp_arrives(unsigned warp_id, const active_mask_t &active_mask,
                             address_type next_pc);
   void reorder_cycle();
@@ -2619,6 +2639,22 @@ class shader_core_ctx : public core_t {
     REORDER_WAITING,
     REORDER_PASSED
   };
+  // Dynamic register allocation: registers per thread held by each warp slot
+  // (granule-rounded); the SM pool has m_dynreg_used of its registers in use.
+  std::vector<unsigned> m_dynreg_held;
+  std::vector<bool> m_dynreg_resident;
+  std::vector<bool> m_dynreg_blocked;          // last issue attempt was refused
+  std::vector<address_type> m_dynreg_callsite; // last call_*_shader issued
+  unsigned long long m_dynreg_used;
+  const class function_info *m_dynreg_entry;   // kernel whose warps are resident
+  unsigned m_dynreg_alloc;  // its ptxas count
+  unsigned m_dynreg_start;  // registers per thread a new warp starts with
+  unsigned m_dynreg_peak;   // registers per thread a warp may come to need
+  unsigned long long m_dynreg_stuck;  // cycles every resident warp waited
+  unsigned dynreg_need(unsigned warp_id, address_type pc);
+  int dynreg_oldest() const;
+  void dynreg_admit(unsigned warp_id);
+  void dynreg_release(unsigned warp_id);
   std::vector<reorder_state_t> m_reorder_state;
   std::vector<unsigned long long> m_reorder_arrival_cycle;
   std::vector<address_type> m_reorder_next_pc;

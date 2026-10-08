@@ -312,5 +312,9 @@ for l in lines:
     print(l)
     fout.writelines(l+"\n")
 
-os.system("rm -rf temp_ptxas_shader.ptx")
+# generate_rt_livetable.py needs the rewritten PTX
+if os.environ.get("GEN_RT_PTXINFO_KEEP"):
+    os.rename("temp_ptxas_shader.ptx", os.environ["GEN_RT_PTXINFO_KEEP"])
+else:
+    os.system("rm -rf temp_ptxas_shader.ptx")
 os.system("rm -rf elf.o")
