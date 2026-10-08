@@ -149,6 +149,15 @@ void* memory_space_impl<BSIZE>::find_vulkan_buffer(mem_addr_t addr) const {
   mem_addr_t index = addr & ~(VULKAN_ADDR_BLK - 1);
   unsigned offset = addr & (VULKAN_ADDR_BLK - 1);
 
+  if (!m_vulkan_ranges.empty()) {
+    auto it =
+        m_vulkan_ranges.upper_bound((unsigned long long)index);
+    if (it != m_vulkan_ranges.begin()) {
+      --it;
+      if ((unsigned long long)index < it->second.end)
+        return (void*)(it->second.host + ((unsigned long long)index - it->first) + offset);
+    }
+  }
   if (m_vulkan_address_map.find((void*)index) != m_vulkan_address_map.end()) {
     void* vulkan_addr = m_vulkan_address_map.at((void*)index);
     return (void*)((unsigned long long)vulkan_addr + offset);
@@ -223,13 +232,45 @@ void memory_space_impl<BSIZE>::set_watch(addr_t addr, unsigned watchpoint) {
 
 template <unsigned BSIZE>
 void memory_space_impl<BSIZE>::bind_vulkan_buffer(void* bufferAddr, unsigned bufferSize, void* devPtr) {
-  unsigned index = 0;
-  void* addr = bufferAddr;
-  while (addr < (bufferAddr + bufferSize)) {
-    m_vulkan_address_map[devPtr + index * VULKAN_ADDR_BLK] = addr;
-    addr += VULKAN_ADDR_BLK;
-    index++;
+  // blocks the per-block map created: devPtr + 16*i for i < ceil(size/16)
+  unsigned long long blocks = (bufferSize + VULKAN_ADDR_BLK - 1) / VULKAN_ADDR_BLK;
+  if (blocks == 0) return;
+  unsigned long long s = (unsigned long long)devPtr;
+  if (s & (VULKAN_ADDR_BLK - 1)) {
+    unsigned index = 0;
+    void* addr = bufferAddr;
+    while (addr < (bufferAddr + bufferSize)) {
+      m_vulkan_address_map[devPtr + index * VULKAN_ADDR_BLK] = addr;
+      addr += VULKAN_ADDR_BLK;
+      index++;
+    }
+    return;
   }
+  unsigned long long e = s + blocks * VULKAN_ADDR_BLK;
+  // the new range wins over every block it covers: cut overlapping ranges
+  auto it = m_vulkan_ranges.lower_bound(s);
+  if (it != m_vulkan_ranges.begin()) {
+    auto p = it;
+    --p;
+    if (p->second.end > s) {
+      vulkan_range left = p->second;
+      if (left.end > e)  // old range sticks out on the right
+        m_vulkan_ranges[e] = vulkan_range{left.end, left.host + (e - p->first)};
+      p->second.end = s;
+    }
+  }
+  while (it != m_vulkan_ranges.end() && it->first < e) {
+    if (it->second.end > e) {
+      vulkan_range right{it->second.end, it->second.host + (e - it->first)};
+      it = m_vulkan_ranges.erase(it);
+      m_vulkan_ranges[e] = right;
+      break;
+    }
+    it = m_vulkan_ranges.erase(it);
+  }
+  m_vulkan_ranges[s] = vulkan_range{e, (unsigned long long)bufferAddr};
+  // Unaligned-key entries live in the old map; an aligned lookup index never
+  // equals such a key, so the two kinds never shadowed each other before either.
 }
 
 template class memory_space_impl<32>;

@@ -130,7 +130,18 @@ class memory_space_impl : public memory_space {
   typedef mem_map<mem_addr_t, mem_storage<BSIZE> > map_t;
   map_t m_data;
   std::map<unsigned, mem_addr_t> m_watchpoints;
-  std::map<void*, void*> m_vulkan_address_map;
+  // Vulkan buffer/image binding: shader address -> host address. One entry
+  // per bound range (not per 16-byte block, which cost ~4x the bound bytes in
+  // host memory). Ranges never overlap: a later binding replaces the blocks it
+  // covers, exactly as the per-block map did. Bindings whose start is not
+  // 16-byte aligned keep the per-block map (their blocks are only reachable by
+  // the same aligned-key lookups as before).
+  struct vulkan_range {
+    unsigned long long end;   // exclusive, start + 16 * blocks
+    unsigned long long host;  // host address of the range start
+  };
+  std::map<unsigned long long, vulkan_range> m_vulkan_ranges;  // key: start
+  std::map<void*, void*> m_vulkan_address_map;  // unaligned bindings only
 };
 
 #endif
