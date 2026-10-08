@@ -311,6 +311,13 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "(at least their starting registers); 0 = naive admission",
       "0");
   option_parser_register(
+      opp, "-gpgpu_dynreg_admit", OPT_UINT32, &m_dynreg_admit,
+      "dynamic registers, admission rule: 0 = the free registers must cover the "
+      "oldest warp's reserve plus alpha times the new warps' peak; 1 = also "
+      "count every resident warp at max(its registers, alpha times the peak) and "
+      "the new warps at alpha times the peak, within the register file",
+      "0");
+  option_parser_register(
       opp, "-gpgpu_dynreg_cap_registers", OPT_UINT32, &m_dynreg_cap_registers,
       "dynamic registers: cap the CTAs per SM at what a static allocation gets "
       "with this many registers per SM (e.g. 65536 with a smaller "

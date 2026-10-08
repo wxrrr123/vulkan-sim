@@ -1805,6 +1805,8 @@ class shader_core_config : public core_config {
                               // 1 = union over every PC on its SIMT stack
   unsigned m_dynreg_deadlock_cycles;
   float m_dynreg_alpha;             // admission headroom, fraction of a warp's peak
+  unsigned m_dynreg_admit;          // 0 = headroom for the new warps only,
+                                    // 1 = also for the resident warps' growth
   unsigned m_dynreg_cap_registers;  // warp cap: static CTAs/SM with this many registers
   char * m_rt_coherence_engine_config_str;
   ray_coherence_config m_rt_coherence_engine_config;

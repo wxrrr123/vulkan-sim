@@ -6738,7 +6738,10 @@ void exec_shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst,
  * - A new CTA starts within the warp slot limit, and only if the free
  *   registers cover the oldest warp's growth to the peak plus the new warps'
  *   starting registers, or -gpgpu_dynreg_alpha times their peak if that is
- *   more (alpha 0: naive admission). -gpgpu_dynreg_cap_registers also caps
+ *   more (alpha 0: naive admission). With -gpgpu_dynreg_admit 1 every
+ *   resident warp also counts as max(its registers, alpha x peak) and the
+ *   new warps as alpha x peak, and the sum must fit in the register file
+ *   (headroom for the residents' growth). -gpgpu_dynreg_cap_registers also caps
  *   the CTAs per SM at the static count for that register file size.
  * - If every resident warp waits for registers for -gpgpu_dynreg_deadlock_cycles,
  *   the simulation aborts. */
@@ -6977,7 +6980,16 @@ bool shader_core_ctx::dynreg_can_admit(kernel_info_t &kernel) {
   unsigned long long room = std::max(
       add, (unsigned long long)(m_config->m_dynreg_alpha * m_dynreg_peak * ws *
                                 warps + 0.5));
-  if (avail < reserve + room) {
+  bool ok = avail >= reserve + room;
+  if (ok && m_config->m_dynreg_admit == 1) {
+    // count the resident warps' growth too: each at least alpha x peak
+    double a = m_config->m_dynreg_alpha * m_dynreg_peak * ws, sum = a * warps;
+    for (unsigned w = 0; w < m_dynreg_resident.size(); w++)
+      if (m_dynreg_resident[w])
+        sum += std::max((double)m_dynreg_held[w] * ws, a);
+    ok = sum <= m_config->gpgpu_shader_registers;
+  }
+  if (!ok) {
     m_stats->dynreg_admit_blocked++;
     return false;
   }
