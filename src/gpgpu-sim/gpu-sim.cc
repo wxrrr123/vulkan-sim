@@ -288,7 +288,8 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "dynamic register allocation: a warp holds the live registers at its "
       "current PC (per-PTX-line table from scripts/generate_rt_livetable.py) "
       "instead of the ptxas count; CTAs are admitted by free registers "
-      "(-gpgpu_shader_registers) and warp slots; 0 = off",
+      "(-gpgpu_shader_registers) and warp slots; 0 = off, 2 = track only: "
+      "static allocation and admission, the live registers are only counted",
       "0");
   option_parser_register(
       opp, "-gpgpu_dynreg_gran", OPT_UINT32, &m_dynreg_gran,
@@ -317,6 +318,34 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "count every resident warp at max(its registers, alpha times the peak) and "
       "the new warps at alpha times the peak, within the register file",
       "0");
+  option_parser_register(
+      opp, "-gpgpu_dynreg_trace", OPT_UINT32, &m_dynreg_trace,
+      "dynamic registers: every this many cycles write each resident warp's "
+      "registers to dynreg_trace.txt (0 = off)",
+      "0");
+  option_parser_register(
+      opp, "-gpgpu_dynreg_adapt_window", OPT_UINT32, &m_dynreg_adapt_window,
+      "dynamic registers, adaptive admission: every this many cycles each SM "
+      "raises alpha by -gpgpu_dynreg_adapt_step if the share of its resident "
+      "warps waiting for registers was above -gpgpu_dynreg_adapt_hi, lowers it "
+      "if below -gpgpu_dynreg_adapt_lo (0 = fixed alpha)",
+      "0");
+  option_parser_register(opp, "-gpgpu_dynreg_adapt_hi", OPT_FLOAT,
+                         &m_dynreg_adapt_hi, "see -gpgpu_dynreg_adapt_window", "0.1");
+  option_parser_register(opp, "-gpgpu_dynreg_adapt_lo", OPT_FLOAT,
+                         &m_dynreg_adapt_lo, "see -gpgpu_dynreg_adapt_window", "0.02");
+  option_parser_register(opp, "-gpgpu_dynreg_adapt_step", OPT_FLOAT,
+                         &m_dynreg_adapt_step, "see -gpgpu_dynreg_adapt_window", "0.05");
+  option_parser_register(opp, "-gpgpu_dynreg_alpha_min", OPT_FLOAT,
+                         &m_dynreg_alpha_min, "adaptive alpha lower bound", "0.6");
+  option_parser_register(opp, "-gpgpu_dynreg_alpha_max", OPT_FLOAT,
+                         &m_dynreg_alpha_max, "adaptive alpha upper bound", "1.0");
+  option_parser_register(
+      opp, "-gpgpu_dynreg_alpha_init", OPT_CSTR, &m_dynreg_alpha_init_str,
+      "dynamic registers: starting alpha per Vulkan launch as <launch index>=<alpha>,... "
+      "(index as printed by 'gpgpusim: launch i'); launches not listed start "
+      "at -gpgpu_dynreg_alpha",
+      "");
   option_parser_register(
       opp, "-gpgpu_dynreg_cap_registers", OPT_UINT32, &m_dynreg_cap_registers,
       "dynamic registers: cap the CTAs per SM at what a static allocation gets "

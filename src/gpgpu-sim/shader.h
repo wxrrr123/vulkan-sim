@@ -1808,6 +1808,11 @@ class shader_core_config : public core_config {
   unsigned m_dynreg_admit;          // 0 = headroom for the new warps only,
                                     // 1 = also for the resident warps' growth
   unsigned m_dynreg_cap_registers;  // warp cap: static CTAs/SM with this many registers
+  unsigned m_dynreg_trace;          // sample every warp's registers every N cycles (0 = off)
+  unsigned m_dynreg_adapt_window;   // adaptive alpha: window in cycles (0 = fixed alpha)
+  float m_dynreg_adapt_hi, m_dynreg_adapt_lo, m_dynreg_adapt_step;
+  float m_dynreg_alpha_min, m_dynreg_alpha_max;
+  char *m_dynreg_alpha_init_str;    // starting alpha per Vulkan launch, "i=a,..."
   char * m_rt_coherence_engine_config_str;
   ray_coherence_config m_rt_coherence_engine_config;
   bool bypassL0Complet;
@@ -1944,6 +1949,9 @@ struct shader_core_stats_pod {
   unsigned long long dynreg_used_sum;       // allocated registers summed over SM cycles
   unsigned long long dynreg_used_max;       // most registers allocated on one SM
   unsigned long long dynreg_over_peak;      // warp needs above the reserved peak (should be 0)
+  unsigned long long dynreg_alpha_up;       // adaptive alpha raised (window over the high mark)
+  unsigned long long dynreg_alpha_down;     // ... lowered (window under the low mark)
+  unsigned long long dynreg_alpha_sum;      // alpha x 1000 summed over SM cycles
   // Diagnostic: RT unit occupancy, L1D accesses by source
   unsigned long long rt_diag_cycles, rt_diag_busy, rt_diag_full, rt_diag_warp_cycles;
   unsigned long long l1d_ldst_acc, l1d_ldst_hit, l1d_ldst_hitres, l1d_rt_acc, l1d_rt_hit, l1d_rt_hitres;
@@ -2653,9 +2661,14 @@ class shader_core_ctx : public core_t {
   unsigned m_dynreg_start;  // registers per thread a new warp starts with
   unsigned m_dynreg_peak;   // registers per thread a warp may come to need
   unsigned long long m_dynreg_stuck;  // cycles every resident warp waited
+  float m_dynreg_alpha_cur;           // admission alpha (adapted per SM)
+  unsigned m_dynreg_alpha_uid;        // kernel the alpha was started for
+  unsigned long long m_dynreg_win_cycles, m_dynreg_win_regwait, m_dynreg_win_resident;
+  unsigned long long m_dynreg_trace_ctr;
   unsigned dynreg_need(unsigned warp_id, address_type pc);
   int dynreg_oldest() const;
   void dynreg_admit(unsigned warp_id);
+  float dynreg_alpha_init(kernel_info_t &kernel) const;
   void dynreg_release(unsigned warp_id);
   std::vector<reorder_state_t> m_reorder_state;
   std::vector<unsigned long long> m_reorder_arrival_cycle;

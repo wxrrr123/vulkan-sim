@@ -91,6 +91,10 @@ void exec_shader_core_ctx::create_shd_warp() {
   m_dynreg_entry = NULL;
   m_dynreg_alloc = m_dynreg_start = m_dynreg_peak = 0;
   m_dynreg_stuck = 0;
+  m_dynreg_alpha_cur = m_config->m_dynreg_alpha;
+  m_dynreg_alpha_uid = (unsigned)-1;
+  m_dynreg_win_cycles = m_dynreg_win_regwait = m_dynreg_win_resident = 0;
+  m_dynreg_trace_ctr = 0;
   if (m_config->m_dynreg)
     assert(m_config->m_rt_reorder_policy == 0 && !m_config->gpgpu_concurrent_kernel_sm &&
            m_config->model == POST_DOMINATOR);
@@ -886,9 +890,11 @@ void shader_core_stats::print(FILE *fout) const {
           warp_state[10]);
   fprintf(fout,
           "DynReg: grows=%llu denied=%llu denied_reserve=%llu stall_cycles=%llu "
-          "admit_blocked=%llu used_sum=%llu used_max=%llu over_peak=%llu\n",
+          "admit_blocked=%llu used_sum=%llu used_max=%llu over_peak=%llu "
+          "alpha_up=%llu alpha_down=%llu alpha_sum=%llu\n",
           dynreg_grows, dynreg_denied, dynreg_denied_reserve, dynreg_stall_cycles,
-          dynreg_admit_blocked, dynreg_used_sum, dynreg_used_max, dynreg_over_peak);
+          dynreg_admit_blocked, dynreg_used_sum, dynreg_used_max, dynreg_over_peak,
+          dynreg_alpha_up, dynreg_alpha_down, dynreg_alpha_sum);
   fprintf(fout, "RTUnitDiag: cycles=%llu busy=%llu full=%llu warp_cycles=%llu\n",
           rt_diag_cycles, rt_diag_busy, rt_diag_full, rt_diag_warp_cycles);
   fprintf(fout,
@@ -4787,7 +4793,7 @@ unsigned int shader_core_config::max_cta(const kernel_info_t &k) const {
   unsigned int result_regs = (unsigned)-1;
   // dynreg: admission by free registers, optionally capped at the static
   // count for -gpgpu_dynreg_cap_registers
-  unsigned regfile = m_dynreg ? m_dynreg_cap_registers : gpgpu_shader_registers;
+  unsigned regfile = m_dynreg == 1 ? m_dynreg_cap_registers : gpgpu_shader_registers;
   if (kernel_info->regs > 0 && regfile > 0)
     result_regs = regfile / (padded_cta_size * ((kernel_info->regs + 3) & ~3));
 
@@ -5387,6 +5393,38 @@ void shader_core_ctx::diag_sample_warp_states()
   if (m_config->m_dynreg) {
     if (n_ready == 0 && n_regwait > 0) m_stats->dynreg_stall_cycles++;
     m_stats->dynreg_used_sum += m_dynreg_used;
+    m_stats->dynreg_alpha_sum += (unsigned long long)(m_dynreg_alpha_cur * 1000 + 0.5);
+    // adaptive alpha: share of the resident warps that waited for registers
+    if (m_config->m_dynreg_adapt_window && n_resident > 0) {
+      m_dynreg_win_regwait += n_regwait;
+      m_dynreg_win_resident += n_resident;
+      if (++m_dynreg_win_cycles >= m_config->m_dynreg_adapt_window) {
+        double f = (double)m_dynreg_win_regwait / m_dynreg_win_resident;
+        if (f > m_config->m_dynreg_adapt_hi &&
+            m_dynreg_alpha_cur < m_config->m_dynreg_alpha_max) {
+          m_dynreg_alpha_cur = std::min(m_config->m_dynreg_alpha_max,
+                                        m_dynreg_alpha_cur + m_config->m_dynreg_adapt_step);
+          m_stats->dynreg_alpha_up++;
+        } else if (f < m_config->m_dynreg_adapt_lo &&
+                   m_dynreg_alpha_cur > m_config->m_dynreg_alpha_min) {
+          m_dynreg_alpha_cur = std::max(m_config->m_dynreg_alpha_min,
+                                        m_dynreg_alpha_cur - m_config->m_dynreg_adapt_step);
+          m_stats->dynreg_alpha_down++;
+        }
+        m_dynreg_win_cycles = m_dynreg_win_regwait = m_dynreg_win_resident = 0;
+      }
+    }
+    // trace: <launch> <SM> <SM cycle> <alpha> <dynamic warp id>:<registers per thread> ...
+    if (m_config->m_dynreg_trace && n_resident > 0 &&
+        ++m_dynreg_trace_ctr % m_config->m_dynreg_trace == 0) {
+      static FILE *trace = fopen("dynreg_trace.txt", "w");
+      fprintf(trace, "%d %u %llu %.2f", m_kernel ? m_kernel->m_vulkan_launch : -1,
+              m_sid, m_dynreg_trace_ctr, m_dynreg_alpha_cur);
+      for (unsigned w = 0; w < m_config->max_warps_per_shader; w++)
+        if (m_dynreg_resident[w])
+          fprintf(trace, " %u:%u", m_warp[w]->get_dynamic_warp_id(), m_dynreg_held[w]);
+      fprintf(trace, "\n");
+    }
     // Every resident warp waits for registers: none can issue, so none
     // releases any; the oldest-warp reserve is meant to make this impossible.
     if (n_regwait > 0 && n_regwait == n_resident) {
@@ -6743,6 +6781,11 @@ void exec_shader_core_ctx::checkExecutionStatusAndUpdate(warp_inst_t &inst,
  *   new warps as alpha x peak, and the sum must fit in the register file
  *   (headroom for the residents' growth). -gpgpu_dynreg_cap_registers also caps
  *   the CTAs per SM at the static count for that register file size.
+ * - -gpgpu_dynreg_adapt_window: each SM adapts alpha (from
+ *   -gpgpu_dynreg_alpha_init) to the share of its resident warps that waited
+ *   for registers in the last window, within [alpha_min, alpha_max].
+ * - -gpgpu_dynreg 2 tracks the live registers under the static allocation
+ *   and admission (nothing waits), e.g. with -gpgpu_dynreg_trace.
  * - If every resident warp waits for registers for -gpgpu_dynreg_deadlock_cycles,
  *   the simulation aborts. */
 namespace {
@@ -6913,7 +6956,7 @@ bool shader_core_ctx::dynreg_acquire(unsigned w, address_type pc) {
   unsigned held = m_dynreg_held[w];
   unsigned ws = m_config->warp_size;
   bool ok = true;
-  if (need > held) {
+  if (need > held && m_config->m_dynreg == 1) {
     unsigned long long grow = (unsigned long long)(need - held) * ws;
     unsigned long long avail = m_config->gpgpu_shader_registers - m_dynreg_used;
     if (grow > avail) {
@@ -6967,6 +7010,12 @@ bool shader_core_ctx::dynreg_can_admit(kernel_info_t &kernel) {
   } else {
     assert(m_dynreg_entry == kernel.entry());
   }
+  if (kernel.get_uid() != m_dynreg_alpha_uid) {  // start the kernel's alpha
+    m_dynreg_alpha_uid = kernel.get_uid();
+    m_dynreg_alpha_cur = dynreg_alpha_init(kernel);
+    m_dynreg_win_cycles = m_dynreg_win_regwait = m_dynreg_win_resident = 0;
+  }
+  if (m_config->m_dynreg == 2) return true;
   unsigned warps = (kernel.threads_per_cta() + ws - 1) / ws;
   unsigned long long add = (unsigned long long)m_dynreg_start * ws * warps;
   unsigned long long avail = m_config->gpgpu_shader_registers - m_dynreg_used;
@@ -6978,12 +7027,12 @@ bool shader_core_ctx::dynreg_can_admit(kernel_info_t &kernel) {
                                    std::min(m_dynreg_held[o], m_dynreg_peak)) * ws;
   // and the new warps must have room for alpha times their peak
   unsigned long long room = std::max(
-      add, (unsigned long long)(m_config->m_dynreg_alpha * m_dynreg_peak * ws *
+      add, (unsigned long long)(m_dynreg_alpha_cur * m_dynreg_peak * ws *
                                 warps + 0.5));
   bool ok = avail >= reserve + room;
   if (ok && m_config->m_dynreg_admit == 1) {
     // count the resident warps' growth too: each at least alpha x peak
-    double a = m_config->m_dynreg_alpha * m_dynreg_peak * ws, sum = a * warps;
+    double a = m_dynreg_alpha_cur * m_dynreg_peak * ws, sum = a * warps;
     for (unsigned w = 0; w < m_dynreg_resident.size(); w++)
       if (m_dynreg_resident[w])
         sum += std::max((double)m_dynreg_held[w] * ws, a);
@@ -6996,6 +7045,24 @@ bool shader_core_ctx::dynreg_can_admit(kernel_info_t &kernel) {
   return true;
 }
 
+float shader_core_ctx::dynreg_alpha_init(kernel_info_t &kernel) const {
+  float a = m_config->m_dynreg_alpha;
+  const char *spec = m_config->m_dynreg_alpha_init_str;
+  if (spec == NULL || !*spec || kernel.m_vulkan_launch < 0) return a;
+  std::string s(spec);
+  size_t p = 0;
+  while (p < s.size()) {
+    size_t c = s.find(',', p);
+    std::string item = s.substr(p, c == std::string::npos ? std::string::npos : c - p);
+    size_t eq = item.find('=');
+    if (eq != std::string::npos && atoi(item.c_str()) == kernel.m_vulkan_launch)
+      a = atof(item.c_str() + eq + 1);
+    if (c == std::string::npos) break;
+    p = c + 1;
+  }
+  return a;
+}
+
 void shader_core_ctx::dynreg_admit(unsigned w) {
   assert(!m_dynreg_resident[w] && m_dynreg_held[w] == 0);
   m_dynreg_resident[w] = true;
@@ -7003,7 +7070,8 @@ void shader_core_ctx::dynreg_admit(unsigned w) {
   m_dynreg_callsite[w] = (address_type)-1;
   m_dynreg_held[w] = m_dynreg_start;
   m_dynreg_used += (unsigned long long)m_dynreg_start * m_config->warp_size;
-  assert(m_dynreg_used <= m_config->gpgpu_shader_registers);
+  assert(m_config->m_dynreg != 1 ||
+         m_dynreg_used <= m_config->gpgpu_shader_registers);
 }
 
 void shader_core_ctx::dynreg_release(unsigned w) {
