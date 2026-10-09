@@ -29,6 +29,8 @@
 
 #include "ptx_ir.h"
 #include "ptx_parser.h"
+
+static unsigned char spill_kind(const ptx_instruction *pI);
 typedef void *yyscan_t;
 #include <assert.h>
 #include <stdio.h>
@@ -647,11 +649,49 @@ void function_info::do_pdom() {
     // printf("########## decoding line %d\n", pI->source_line());
     pI->pre_decode();
   }
+  // spill injection: with VKSIM_SPILL_BLOCK=1 the first original instruction
+  // of a line waits for the line's injected loads (Scoreboard::checkCollision)
+  const char *spill_block = getenv("VKSIM_SPILL_BLOCK");
+  bool spill_pending = false;
+  unsigned spill_line = 0;
+  for (unsigned ii = 0; ii < m_n; ii += m_instr_mem[ii]->inst_size()) {
+    ptx_instruction *pI = m_instr_mem[ii];
+    pI->spill_inject = spill_kind(pI);
+    if ((pI->spill_inject == 1 || pI->spill_inject == 2) && pI->get_vector())
+      pI->data_size *= pI->get_vector() == V2_TYPE ? 2 : 4;  // full width
+    if (pI->spill_inject == 1) {
+      for (unsigned i = 0; i < MAX_OUTPUT_VALUES; i++)
+        if (pI->out[i] > 0) g_spill_ld_regs.insert(pI->out[i]);
+      spill_pending = true;
+      spill_line = pI->source_line();
+    } else if (!pI->spill_inject) {
+      if (spill_pending && spill_line == pI->source_line() && spill_block &&
+          atoi(spill_block))
+        pI->spill_wait = true;
+      spill_pending = false;
+    }
+  }
   printf("GPGPU-Sim PTX: ... done pre-decoding instructions for \'%s\'.\n",
          m_name.c_str());
   fflush(stdout);
   m_assembled = true;
 }
+// spill injection (scripts/spill_inject.py): injected accesses address
+// __spill_frame, the setup moves write %__sps*
+static unsigned char spill_kind(const ptx_instruction *pI) {
+  int op = pI->get_opcode();
+  if (op != LD_OP && op != ST_OP && op != MOV_OP) return 0;
+  for (unsigned n = 0; n < pI->get_num_operands(); n++) {
+    const operand_info &o = pI->operand_lookup(n);
+    if (op != MOV_OP && o.is_memory_operand() && o.name() == "__spill_frame")
+      return op == LD_OP ? 1 : 2;
+    if (op == MOV_OP && n == 0 && o.is_reg() &&
+        o.name().find("__sps") != std::string::npos)
+      return 3;
+  }
+  return 0;
+}
+
 void intersect(std::set<int> &A, const std::set<int> &B) {
   // return intersection of A and B in A
   for (std::set<int>::iterator a = A.begin(); a != A.end();) {

@@ -66,6 +66,7 @@ namespace fs = boost::filesystem;
 #include "../gpgpusim_entrypoint.h"
 #include "../stream_manager.h"
 #include "../abstract_hardware_model.h"
+#include <sys/wait.h>
 #include "vulkan_acceleration_structure_util.h"
 #include "../gpgpu-sim/vector-math.h"
 
@@ -1481,7 +1482,28 @@ uint32_t VulkanRayTracing::registerShaders(char * shaderPath, gl_shader_stage sh
 
     // PTX File
     //std::cout << itr << std::endl;
-    symtab = ctx->gpgpu_ptx_sim_load_ptx_from_filename(shaderPath);
+    // spill injection for a register-capped static baseline: the shader the
+    // spec was made from is parsed with the injected accesses
+    // (scripts/spill_inject.py); its register count is set after ptxinfo
+    const char *spill_spec = getenv("VKSIM_SPILL_SPEC");
+    std::string parse_path = shaderPath;
+    bool spilled = false;
+    if (spill_spec && *spill_spec) {
+        char spill_cmd[1200];
+        snprintf(spill_cmd, sizeof(spill_cmd), "python3 %s/scripts/spill_inject.py inject %s %s",
+                 gpgpusim_root, shaderPath, spill_spec);
+        int r = system(spill_cmd);
+        if (WIFEXITED(r) && WEXITSTATUS(r) == 0) {
+            size_t slash = parse_path.find_last_of('/');
+            parse_path = parse_path.substr(0, slash + 1) + "spill_injected/" +
+                         parse_path.substr(slash + 1);
+            spilled = true;
+        } else if (!WIFEXITED(r) || WEXITSTATUS(r) != 3) {
+            printf("GPGPU-Sim PTX: ERROR ** spill injection failed on %s\n", shaderPath);
+            exit(1);
+        }
+    }
+    symtab = ctx->gpgpu_ptx_sim_load_ptx_from_filename(parse_path.c_str());
     context->add_binary(symtab, fat_cubin_handle);
     // need to add all the magic registers to ptx.l to special_register, reference ayub ptx.l:225
 
@@ -1497,6 +1519,15 @@ uint32_t VulkanRayTracing::registerShaders(char * shaderPath, gl_shader_stage sh
         exit(1);
     }
     
+    if (spilled) {
+        char spill_cmd[1200];
+        snprintf(spill_cmd, sizeof(spill_cmd), "python3 %s/scripts/spill_inject.py info %s %s",
+                 gpgpusim_root, shaderPath, spill_spec);
+        if (system(spill_cmd) != 0) {
+            printf("GPGPU-Sim PTX: ERROR ** spill register count failed on %s\n", shaderPath);
+            exit(1);
+        }
+    }
     char ptxinfo_filename[400];
     snprintf(ptxinfo_filename, sizeof(ptxinfo_filename), "%sinfo", shaderPath);
     ctx->gpgpu_ptx_info_load_from_external_file(ptxinfo_filename); // TODO: make a version where it just loads my ptxinfo instead of generating a new one

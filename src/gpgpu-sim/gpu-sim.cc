@@ -1458,6 +1458,8 @@ void gpgpu_sim::gpu_print_stat() {
   fprintf(statfout, "gpu_ipc = %12.4f\n", (float)gpu_sim_insn / gpu_sim_cycle);
   fprintf(statfout, "gpu_tot_sim_cycle = %lld\n", gpu_tot_sim_cycle + gpu_sim_cycle);
   fprintf(statfout, "gpu_tot_sim_insn = %lld\n", gpu_tot_sim_insn + gpu_sim_insn);
+  fprintf(statfout, "spill_inject_threads: ld = %llu st = %llu\n",
+          g_spill_threads[0], g_spill_threads[1]);
   fprintf(statfout, "gpu_tot_ipc = %12.4f\n", (float)(gpu_tot_sim_insn + gpu_sim_insn) /
                                        (gpu_tot_sim_cycle + gpu_sim_cycle));
   fprintf(statfout, "gpu_tot_issued_cta = %lld\n",

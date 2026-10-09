@@ -147,6 +147,11 @@ void Scoreboard::releaseRegisters(const class warp_inst_t* inst) {
  * true if WAW or RAW hazard (no WAR since in-order issue)
  **/
 bool Scoreboard::checkCollision(unsigned wid, const class inst_t* inst) const {
+  // spill injection, blocking mode: wait for the injected loads in flight
+  if (inst->spill_wait)
+    for (std::set<unsigned>::const_iterator r = reg_table[wid].begin();
+         r != reg_table[wid].end(); ++r)
+      if (g_spill_ld_regs.count(*r)) return true;
   // Get list of all input and output registers
   std::set<int> inst_regs;
 

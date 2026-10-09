@@ -2120,8 +2120,11 @@ void ptx_thread_info::ptx_exec_inst(warp_inst_t &inst, unsigned lane_id) {
     m_gpu->gpgpu_ctx->func_sim->g_ptx_sim_num_insn++;
 
     // not using it with functional simulation mode
-    if (!(this->m_functionalSimulationMode))
+    if (!(this->m_functionalSimulationMode)) {
       ptx_file_line_stats_add_exec_count(pI);
+      if (pI->spill_inject == 1 || pI->spill_inject == 2)
+        g_spill_threads[pI->spill_inject - 1]++;
+    }
 
     if (m_gpu->gpgpu_ctx->func_sim->gpgpu_ptx_instruction_classification) {
       m_gpu->gpgpu_ctx->func_sim->init_inst_classification_stat();

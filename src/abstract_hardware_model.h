@@ -1106,6 +1106,12 @@ struct dram_callback_t {
   class ptx_thread_info *thread;
 };
 
+// spill injection (scripts/spill_inject.py, VKSIM_SPILL_SPEC): registers the
+// injected local loads write, and thread-level counts of injected loads and
+// stores in timing simulation
+extern std::set<unsigned> g_spill_ld_regs;
+extern unsigned long long g_spill_threads[2];
+
 class inst_t {
  public:
   inst_t() {
@@ -1137,6 +1143,8 @@ class inst_t {
     }
     isize = 0;
     is_reorder = false;
+    spill_inject = 0;
+    spill_wait = false;
   }
   bool valid() const { return m_decoded; }
   virtual void print_insn(FILE *fp) const {
@@ -1174,6 +1182,8 @@ class inst_t {
   unsigned isize;   // size of instruction in bytes
   op_type op;       // opcode (uarch visible)
   bool is_reorder; // reorder_thread_nv: handled by the SM reorder unit
+  unsigned char spill_inject;  // 1 injected load, 2 injected store, 3 setup
+  bool spill_wait;  // waits for its line's injected loads (VKSIM_SPILL_BLOCK)
 
   barrier_type bar_type;
   reduction_type red_type;

@@ -164,6 +164,9 @@ void checkpoint::store_global_mem(class memory_space *mem, char *fname,
   fclose(fp3);
 }
 
+std::set<unsigned> g_spill_ld_regs;
+unsigned long long g_spill_threads[2] = {0, 0};
+
 void move_warp(warp_inst_t *&dst, warp_inst_t *&src) {
   assert(dst->empty());
   warp_inst_t *temp = dst;
