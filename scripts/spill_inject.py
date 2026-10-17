@@ -16,6 +16,16 @@
 #       pool of 256 registers (%__spl*); stores read %__sps0-3.
 #   python3 spill_inject.py info <shader.ptx> <spec>
 #       Set the register count in <shader.ptx>info to the spec's.
+#   python3 spill_inject.py tsave <orig.ptx> <orig.ptxlive> <out.spec> [<spill spec>]
+#       Registers saved across every trace_ray: the GPRs live both at the nearest
+#       PTX line before the trace_ray and at the nearest one after its end_trace_ray
+#       that have SASS (per-line live sets of generate_rt_livetable.py, i.e. the
+#       ptxas allocation the simulator uses). They are stored after the PTX
+#       instruction before the trace_ray and loaded before the first one after the
+#       end_trace_ray, 16 bytes per access (the rest 8 / 4), into an area after the
+#       spill spec's frame when one is given (its accesses and register count are
+#       kept), else with the shader's own register count.
+# <spec> can be several specs separated by ':'; a shader gets the first one it matches.
 # Shaders are matched by line count and by the text of every line with a spill,
 # with label numbers masked (Mesa numbers labels across all shaders it compiles,
 # so the same shader gets different label numbers in different runs).
@@ -103,10 +113,74 @@ def matches(lines, spec):
     return all(norm(lines[n - 1]) == h for n, h in spec["L"].items())
 
 
-def inject(ptx, spec_path):
-    spec = read_spec(spec_path)
+def find_spec(lines, spec_paths):
+    for p in spec_paths.split(":"):
+        spec = read_spec(p)
+        if matches(lines, spec):
+            return spec
+    return None
+
+
+INST = re.compile(r"^\s*(?:@!?%\S+\s+)?[a-z_]\w*(?:\.\S+)?(?:\s|;)")
+
+
+def is_inst(line):
+    code = line.split("//")[0].strip()
+    return bool(code) and not code.startswith(".") and not code.endswith(":") and bool(INST.match(code))
+
+
+def make_tsave(ptx, livetab, out, spill=None):
     lines = open(ptx).read().split("\n")
-    if not matches(lines, spec):
+    live = {}
+    for l in open(livetab):
+        p = l.split()
+        if p[0] == "alloc":
+            alloc = int(p[1])
+        else:
+            live[int(p[0])] = int(p[2], 16)
+    base = read_spec(spill) if spill else dict(regs=alloc, frame=0, L={}, A={})
+    assert not spill or base["lines"] == len(lines), "spill spec is for another shader"
+    area = (base["frame"] + 15) // 16 * 16
+    tr = [i for i, l in enumerate(lines, 1) if l.strip().startswith("trace_ray ")]
+    en = [i for i, l in enumerate(lines, 1) if l.strip().startswith("end_trace_ray")]
+    assert len(tr) == len(en) and all(t < e for t, e in zip(tr, en))
+    acc, L, nmax = [], dict(base["L"]), 0
+    for t, e in zip(tr, en):
+        pre = max(n for n in live if n < t)
+        post = min(n for n in live if n > e)
+        n = bin(live[pre] & live[post]).count("1")
+        st = max(i for i in range(1, t) if is_inst(lines[i - 1]))
+        ld = min(i for i in range(e + 1, len(lines) + 1) if is_inst(lines[i - 1]))
+        for i in list(range(st + 1, t)) + list(range(e + 1, ld)):   # same block: no label in between
+            assert not lines[i - 1].split("//")[0].strip().endswith(":"), (t, i)
+        offs, o = [], 0
+        while o < 4 * n:
+            w = 16 if 4 * n - o >= 16 else 8 if 4 * n - o >= 8 else 4
+            offs.append((w, area + o))
+            o += w
+        acc += [(st, "ST", w, off) for w, off in offs] + [(ld, "LD", w, off) for w, off in offs]
+        L[st], L[ld] = norm(lines[st - 1]), norm(lines[ld - 1])
+        nmax = max(nmax, n)
+        print("tsave %s: trace_ray line %d: %d registers (live %d before at line %d, %d after at line %d); "
+              "%d st after line %d, %d ld before line %d"
+              % (ptx, t, n, bin(live[pre]).count("1"), pre, bin(live[post]).count("1"), post, len(offs), st, len(offs), ld))
+    frame = area + (4 * nmax + 15) // 16 * 16
+    with open(out, "w") as f:
+        f.write("spill_spec 1\nregs %d\nframe %d\nlines %d\n" % (base["regs"], frame, len(lines)))
+        for line in sorted(L):
+            f.write("L %d %s\n" % (line, L[line]))
+        for line, a in base["A"].items():
+            for kind, w, off in a:
+                f.write("A %d %s %d %d\n" % (line, "LD" if kind == "LD" else "ST", w, off))
+        for a in acc:
+            f.write("A %d %s %d %d\n" % a)
+    print("tsave spec %s: regs %d, frame %d (save area at %d), %d trace_ray" % (out, base["regs"], frame, area, len(tr)))
+
+
+def inject(ptx, spec_path):
+    lines = open(ptx).read().split("\n")
+    spec = find_spec(lines, spec_path)
+    if not spec:
         return 3
     entry = next(i for i, l in enumerate(lines) if l.lstrip().startswith(".entry") and l.rstrip().endswith("{"))
     assert entry + 1 not in spec["A"]
@@ -148,7 +222,8 @@ def inject(ptx, spec_path):
 
 
 def info(ptx, spec_path):
-    spec = read_spec(spec_path)
+    spec = find_spec(open(ptx).read().split("\n"), spec_path)
+    assert spec, ptx
     path = ptx + "info"
     txt = open(path).read()
     new, n = re.subn(r"Used \d+ registers", "Used %d registers" % spec["regs"], txt)
@@ -166,5 +241,7 @@ if __name__ == "__main__":
         sys.exit(inject(sys.argv[2], sys.argv[3]))
     elif cmd == "info":
         sys.exit(info(sys.argv[2], sys.argv[3]))
+    elif cmd == "tsave":
+        make_tsave(*sys.argv[2:6])
     else:
-        sys.exit("usage: spill_inject.py spec|inject|info ...")
+        sys.exit("usage: spill_inject.py spec|inject|info|tsave ...")
