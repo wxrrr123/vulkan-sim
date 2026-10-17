@@ -1460,6 +1460,10 @@ void gpgpu_sim::gpu_print_stat() {
   fprintf(statfout, "gpu_tot_sim_insn = %lld\n", gpu_tot_sim_insn + gpu_sim_insn);
   fprintf(statfout, "spill_inject_threads: ld = %llu st = %llu\n",
           g_spill_threads[0], g_spill_threads[1]);
+  fprintf(statfout, "l1_local_sector_bytes: rd_hit = %llu rd_hit_reserved = %llu rd_miss = %llu "
+          "wr_hit = %llu wr_hit_reserved = %llu wr_miss = %llu\n",
+          g_l1_local_sector_bytes[0][0], g_l1_local_sector_bytes[0][1], g_l1_local_sector_bytes[0][2],
+          g_l1_local_sector_bytes[1][0], g_l1_local_sector_bytes[1][1], g_l1_local_sector_bytes[1][2]);
   fprintf(statfout, "gpu_tot_ipc = %12.4f\n", (float)(gpu_tot_sim_insn + gpu_sim_insn) /
                                        (gpu_tot_sim_cycle + gpu_sim_cycle));
   fprintf(statfout, "gpu_tot_issued_cta = %lld\n",

@@ -1774,7 +1774,12 @@ enum cache_request_status data_cache::access(new_addr_type addr, mem_fetch *mf,
 enum cache_request_status l1_cache::access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events) {
-  return data_cache::access(addr, mf, time, events);
+  enum cache_request_status s = data_cache::access(addr, mf, time, events);
+  enum mem_access_type t = mf->get_access_type();
+  if (s != RESERVATION_FAIL && (t == LOCAL_ACC_R || t == LOCAL_ACC_W))
+    g_l1_local_sector_bytes[t == LOCAL_ACC_W][s == HIT ? 0 : s == HIT_RESERVED ? 1 : 2] +=
+        32 * mf->get_access_sector_mask().count();
+  return s;
 }
 
 // The l2 cache access function calls the base data_cache access

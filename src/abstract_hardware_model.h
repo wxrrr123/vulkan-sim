@@ -1111,6 +1111,9 @@ struct dram_callback_t {
 // stores in timing simulation
 extern std::set<unsigned> g_spill_ld_regs;
 extern unsigned long long g_spill_threads[2];
+// L1 local sector bytes (32 x sectors touched by each accepted access),
+// [read, write][hit, hit reserved, miss]; statistics only
+extern unsigned long long g_l1_local_sector_bytes[2][3];
 
 class inst_t {
  public:
