@@ -2031,6 +2031,10 @@ void ptx_thread_info::ptx_exec_inst(warp_inst_t &inst, unsigned lane_id) {
         insn_space = last_space();
         unsigned to_type = pI->get_type();
         insn_data_size = datatype2size(to_type);
+        // injected spill / trace-save vector accesses are timed at full width
+        // (datatype2size is the element size); original instructions unchanged
+        if ((pI->spill_inject == 1 || pI->spill_inject == 2) && pI->get_vector())
+          insn_data_size *= pI->get_vector() == V2_TYPE ? 2 : 4;
         insn_memory_op = pI->has_memory_read() ? memory_load : memory_store;
       }
     }
