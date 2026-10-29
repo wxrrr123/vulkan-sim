@@ -1360,6 +1360,14 @@ class rt_unit : public pipelined_simd_unit {
       std::map<unsigned, warp_inst_t> m_current_warps;
       unsigned n_warps;
 
+      // RT unit watchdog (-gpgpu_rt_watchdog); observation only
+      void rt_watchdog_check(unsigned long long now);
+      std::set<unsigned> m_wd_reported;
+      unsigned long long m_wd_probe_empty = 0, m_wd_probe_empty_cycle = 0;
+      new_addr_type m_wd_probe_empty_addr = 0;
+      unsigned long long m_wd_nofind = 0, m_wd_nofind_cycle = 0;
+      new_addr_type m_wd_nofind_addr = 0;
+
       unsigned cacheline_count;
 };
 
@@ -1780,8 +1788,9 @@ class shader_core_config : public core_config {
   unsigned m_rt_bandwidth;
   unsigned m_rt_max_warps;
   unsigned m_rt_max_mshr_entries;
+  unsigned m_rt_watchdog;  // cycles a stalled RT warp may go without progress (0 = off)
   bool m_rt_coalesce_warps;
-  bool m_rt_use_l1d;
+bool m_rt_use_l1d;
   bool m_rt_perfect_mem;
   bool m_rt_coherence_engine;
   // Thread reorder unit for reorder_thread_nv: 0 = off (plain 1-cycle ALU op),

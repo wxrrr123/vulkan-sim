@@ -407,7 +407,8 @@ class gpgpu_sim_config : public power_config,
   bool gpgpu_flush_l1_cache;
   bool gpgpu_flush_l2_cache;
   bool gpu_deadlock_detect;
-  int gpgpu_frfcfs_dram_sched_queue_size;
+  bool gpu_deadlock_print_stats;
+int gpgpu_frfcfs_dram_sched_queue_size;
   int gpgpu_cflog_interval;
   char *gpgpu_clock_domains;
   unsigned max_concurrent_kernel;

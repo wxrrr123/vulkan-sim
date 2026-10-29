@@ -1277,6 +1277,10 @@ typedef struct RTMemoryTransactionRecord {
     }
 } RTMemoryTransactionRecord;
 
+// RT unit watchdog (-gpgpu_rt_watchdog): current cycle, set by rt_unit::cycle so
+// the per-thread request/response record below can be time-stamped.
+extern unsigned long long g_rt_wd_now;
+
 class warp_inst_t : public inst_t {
  public:
   // constructors
@@ -1495,7 +1499,17 @@ class warp_inst_t : public inst_t {
     unsigned long long end_cycle;
     unsigned status_num_cycles[warp_statuses][ray_statuses] = {};
     unsigned m_uid;
-    void clear_mem_accesses() {
+    // RT unit watchdog record (observation only, never read by the timing model):
+    // last request sent to the cache for this thread's current record, and the
+    // last response chunk this thread accepted.
+    new_addr_type wd_req_addr = 0, wd_req_base = 0;
+    unsigned long long wd_req_cycle = 0;
+    int wd_req_status = -1;
+    unsigned wd_req_n = 0;
+    new_addr_type wd_resp_addr = 0, wd_resp_base = 0;
+    unsigned long long wd_resp_cycle = 0;
+    unsigned wd_resp_n = 0;
+void clear_mem_accesses() {
       RT_mem_accesses.clear();
     }
   };
@@ -1521,7 +1535,19 @@ class warp_inst_t : public inst_t {
   
   void update_next_rt_accesses();
   RTMemoryTransactionRecord get_next_rt_mem_transaction();
-  void num_unique_mem_access(std::map<new_addr_type, unsigned> &addr_set);
+  // RT unit watchdog
+  void wd_note_request(new_addr_type addr, new_addr_type base,
+                       unsigned long long cycle, int status);
+  unsigned long long wd_last_progress() const;
+  const std::deque<RTMemoryTransactionRecord> &wd_next_rt_accesses() const {
+    return m_next_rt_accesses;
+  }
+  const struct per_thread_info &wd_thread(unsigned tid) const {
+    return m_per_scalar_thread[tid];
+  }
+  unsigned m_wd_undo_n = 0;
+  unsigned long long m_wd_undo_cycle = 0;
+void num_unique_mem_access(std::map<new_addr_type, unsigned> &addr_set);
   unsigned process_returned_mem_access(const mem_fetch *mf);
   bool process_returned_mem_access(const mem_fetch *mf, unsigned tid);
   bool process_returned_mem_access(bool &mem_record_done, unsigned tid, new_addr_type addr, new_addr_type uncoalesced_base_addr);

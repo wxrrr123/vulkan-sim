@@ -2991,9 +2991,10 @@ void rt_unit::cycle() {
   
   unsigned long long current_cycle =  m_core->get_gpu()->gpu_sim_cycle +
                                       m_core->get_gpu()->gpu_tot_sim_cycle;
+  if (m_config->m_rt_watchdog) g_rt_wd_now = current_cycle;
 
   // RT unit stats
-  if (!pipe_reg.empty()) {
+if (!pipe_reg.empty()) {
     n_warps++;
     RT_DPRINTF("Shader %d: A new warp has arrived! uid: %d, warp id: %d\n", m_sid, pipe_reg.get_uid(), pipe_reg.warp_id());
     // for (unsigned i=0; i<m_config->warp_size; i++) {
@@ -3253,6 +3254,77 @@ void rt_unit::cycle() {
   
   assert(n_warps == m_current_warps.size());
   assert(cacheline_count <= 2);
+
+  if (m_config->m_rt_watchdog && (current_cycle & 1023) == 0)
+    rt_watchdog_check(current_cycle);
+}
+
+// Report (once) every warp that is stalled in the RT unit and has made no
+// progress (no request sent, no response accepted, no undo) for
+// -gpgpu_rt_watchdog cycles. Read-only: nothing here changes simulator state.
+void rt_unit::rt_watchdog_check(unsigned long long now) {
+  for (auto it = m_current_warps.begin(); it != m_current_warps.end(); ++it) {
+    warp_inst_t &w = it->second;
+    if (m_wd_reported.count(it->first)) continue;
+    if (!w.is_stalled()) continue;
+    unsigned long long last = w.wd_last_progress();
+    if (now - last < m_config->m_rt_watchdog) continue;
+    m_wd_reported.insert(it->first);
+
+    baseline_cache *cache = m_config->m_rt_use_l1d ? (baseline_cache *)L1D
+                                                   : (baseline_cache *)m_L0_complet;
+    unsigned inflight = 0;  // awaited chunks with an MSHR entry or a queued response
+    for (unsigned t = 0; t < m_config->warp_size; t++) {
+      const warp_inst_t::per_thread_info &ti = w.wd_thread(t);
+      if (ti.RT_mem_accesses.empty()) continue;
+      const RTMemoryTransactionRecord &r = ti.RT_mem_accesses.front();
+      for (unsigned c = 0; c < 4; c++) {
+        if (!r.mem_chunks.test(c)) continue;
+        new_addr_type a = line_size_based_tag_func(r.address, 32) + c * 32;
+        if (!cache->probe_mshr(a).empty()) inflight++;
+        for (auto f = m_response_fifo.begin(); f != m_response_fifo.end(); ++f)
+          if ((*f)->get_addr() == a) inflight++;
+      }
+    }
+    for (auto q = mem_access_q.begin(); q != mem_access_q.end(); ++q)
+      if (mem_access_q_warp_uid == it->first) inflight++;
+
+    printf("RT-WATCHDOG: cycle %llu sid %u warp %u uid %u pc 0x%llx stalled, "
+           "no progress since cycle %llu (%llu cycles); in-flight %u; "
+           "warp start %llu; queued next accesses %zu; undo %u (last %llu); "
+           "response fifo %zu; mem_access_q %zu (warp uid %u); mem_store_q %zu; "
+           "pending writes %d; %s MSHR entries %u; unit: probe-empty responses "
+           "%llu (last 0x%llx @%llu), no-requester responses %llu (last 0x%llx @%llu)\n",
+           now, m_sid, w.warp_id(), it->first, (unsigned long long)w.pc, last,
+           now - last, inflight, w.get_start_cycle(), w.wd_next_rt_accesses().size(),
+           w.m_wd_undo_n, w.m_wd_undo_cycle, m_response_fifo.size(),
+           mem_access_q.size(), mem_access_q_warp_uid, mem_store_q.size(),
+           (int)w.has_pending_writes(), m_config->m_rt_use_l1d ? "L1D" : "L0",
+           cache->num_mshr_entries(), m_wd_probe_empty,
+           (unsigned long long)m_wd_probe_empty_addr, m_wd_probe_empty_cycle,
+           m_wd_nofind, (unsigned long long)m_wd_nofind_addr, m_wd_nofind_cycle);
+    for (unsigned t = 0; t < m_config->warp_size; t++) {
+      const warp_inst_t::per_thread_info &ti = w.wd_thread(t);
+      if (ti.RT_mem_accesses.empty()) continue;
+      const RTMemoryTransactionRecord &r = ti.RT_mem_accesses.front();
+      printf("RT-WATCHDOG:   thread %u: %zu records left; current 0x%llx size %u "
+             "type %d status %d chunks %s; intersection delay %u; "
+             "last request 0x%llx (base 0x%llx) @%llu status %s (%u requests); "
+             "last response 0x%llx (base 0x%llx) @%llu (%u responses)\n",
+             t, ti.RT_mem_accesses.size(), (unsigned long long)r.address, r.size,
+             (int)r.type, (int)r.status, r.mem_chunks.to_string().c_str(),
+             ti.intersection_delay, (unsigned long long)ti.wd_req_addr,
+             (unsigned long long)ti.wd_req_base, ti.wd_req_cycle,
+             ti.wd_req_status < 0 ? "none"
+                 : cache_request_status_str((enum cache_request_status)ti.wd_req_status),
+             ti.wd_req_n, (unsigned long long)ti.wd_resp_addr,
+             (unsigned long long)ti.wd_resp_base, ti.wd_resp_cycle, ti.wd_resp_n);
+    }
+    for (auto n = w.wd_next_rt_accesses().begin(); n != w.wd_next_rt_accesses().end(); ++n)
+      printf("RT-WATCHDOG:   queued access 0x%llx size %u status %d\n",
+             (unsigned long long)n->address, n->size, (int)n->status);
+    fflush(stdout);
+  }
 }
 
 void rt_unit::process_memory_response(mem_fetch* mf, warp_inst_t &pipe_reg) {
@@ -3295,7 +3367,19 @@ void rt_unit::process_memory_response(mem_fetch* mf, warp_inst_t &pipe_reg) {
           }
         }
       }
-      
+      if (m_config->m_rt_watchdog) {
+        if (response_mf.empty()) {
+          m_wd_probe_empty++;
+          m_wd_probe_empty_addr = mf->get_addr();
+          m_wd_probe_empty_cycle = g_rt_wd_now;
+        }
+        if (requester_thread_found == 0) {
+          m_wd_nofind++;
+          m_wd_nofind_addr = mf->get_addr();
+          m_wd_nofind_cycle = g_rt_wd_now;
+        }
+      }
+
       // Make sure at least one thread accepted the response. (Other threads might still be completing intersection test)
       if (requester_thread_found == 0) {
         RT_DPRINTF("Requester not found for: 0x%x\n", mf->get_addr());
@@ -3613,9 +3697,11 @@ void rt_unit::process_cache_access(baseline_cache *cache, warp_inst_t &inst, mem
   
   new_addr_type addr = mf->get_addr();
   new_addr_type base_addr = mf->get_uncoalesced_base_addr();
+  if (m_config->m_rt_watchdog && !mf->get_is_write())
+    inst.wd_note_request(addr, base_addr, g_rt_wd_now, (int)status);
 
   // Stalled
-  if ((void *)cache == (void *)L1D && status != RESERVATION_FAIL) {
+if ((void *)cache == (void *)L1D && status != RESERVATION_FAIL) {
     int kind = status == HIT ? 0 : status == HIT_RESERVED ? 1 : 2;
     m_core->get_gpu()->gpgpu_ctx->stats->ptx_file_line_stats_add_l1d(inst.pc, kind);
     m_stats->l1d_rt_acc++;

@@ -379,8 +379,13 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "max number of MSHR entries in RT unit ",
       "32");
   option_parser_register(
+      opp, "-gpgpu_rt_watchdog", OPT_UINT32, &m_rt_watchdog,
+      "report a warp stalled in the RT unit with no progress for this many "
+      "cycles, with its threads' last request/response (0 = off; no timing effect)",
+      "0");
+  option_parser_register(
       opp, "-gpgpu_rt_coalesce_warps", OPT_BOOL, &m_rt_coalesce_warps,
-      "try to coalesce memory requests between warps ",
+"try to coalesce memory requests between warps ",
       "0");
   option_parser_register(
       opp, "-gpgpu_rt_intersection_latency", OPT_CSTR, &m_rt_intersection_latency_str,
@@ -747,6 +752,10 @@ void gpgpu_sim_config::reg_options(option_parser_t opp) {
       opp, "-gpgpu_deadlock_detect", OPT_BOOL, &gpu_deadlock_detect,
       "Stop the simulation at deadlock (1=on (default), 0=off)", "1");
   option_parser_register(
+      opp, "-gpgpu_deadlock_print_stats", OPT_BOOL, &gpu_deadlock_print_stats,
+      "at deadlock, print completed/total CTAs and the kernel statistics "
+      "before aborting", "0");
+option_parser_register(
       opp, "-gpgpu_ptx_instruction_classification", OPT_INT32,
       &(gpgpu_ctx->func_sim->gpgpu_ptx_instruction_classification),
       "if enabled will classify ptx instruction types per kernel (Max 255 "
@@ -1327,12 +1336,23 @@ void gpgpu_sim::deadlock_check() {
       printf("GPGPU-Sim uArch DEADLOCK:  iterconnect contains traffic\n");
       icnt_display_state(stdout);
     }
+    if (m_config.gpu_deadlock_print_stats) {
+      unsigned long long total_cta = 0;
+      for (unsigned k = 0; k < m_running_kernels.size(); k++)
+        if (m_running_kernels[k]) total_cta += m_running_kernels[k]->num_blocks();
+      printf("GPGPU-Sim uArch DEADLOCK:  completed CTAs %u / %llu total "
+             "(%llu launched); last commit at gpu_sim_cycle %u\n",
+             gpu_completed_cta, total_cta, m_total_cta_launched,
+             (unsigned)gpu_sim_insn_last_update);
+      fflush(stdout);
+      print_stats();
+    }
     printf(
         "\nRe-run the simulator in gdb and use debug routines in .gdbinit to "
         "debug this\n");
     fflush(stdout);
     abort();
-  }
+}
 }
 
 /// printing the names and uids of a set of executed kernels (usually there is
@@ -2254,9 +2274,14 @@ void gpgpu_sim::cycle() {
       }
     }
 
+    if (m_shader_config->m_rt_watchdog && !(gpu_sim_cycle % 1000000)) {
+      printf("RT-WD heartbeat: gpu_sim_cycle %llu insn %llu completed_cta %u\n",
+             gpu_sim_cycle, gpu_sim_insn, gpu_completed_cta);
+      fflush(stdout);
+    }
     if (!(gpu_sim_cycle % 300000)) {
       // deadlock detection
-      if (m_config.gpu_deadlock_detect && gpu_sim_insn == last_gpu_sim_insn) {
+if (m_config.gpu_deadlock_detect && gpu_sim_insn == last_gpu_sim_insn) {
         gpu_deadlock = true;
       } else {
         last_gpu_sim_insn = gpu_sim_insn;

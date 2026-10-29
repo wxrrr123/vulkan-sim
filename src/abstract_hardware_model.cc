@@ -47,8 +47,10 @@ void mem_access_t::init(gpgpu_context *ctx) {
   m_req_size = 0;
 }
 
+unsigned long long g_rt_wd_now = 0;
+
 warp_inst_t::per_thread_info::per_thread_info() {
-  m_uid = ++(GPGPU_Context()->perthread_uid);
+m_uid = ++(GPGPU_Context()->perthread_uid);
   // GPGPU_Context()->allocate_perthread.insert(m_uid);
   for (unsigned i = 0; i < MAX_ACCESSES_PER_INSN_PER_THREAD; i++)
     memreqaddr[i] = 0;
@@ -1071,8 +1073,33 @@ RTMemoryTransactionRecord warp_inst_t::get_next_rt_mem_transaction() {
   return next_access;
 }
 
-void warp_inst_t::undo_rt_access(new_addr_type addr){ 
-  std::pair<new_addr_type, unsigned> address_size_pair (addr, 32);
+void warp_inst_t::wd_note_request(new_addr_type addr, new_addr_type base,
+                                  unsigned long long cycle, int status) {
+  for (unsigned i = 0; i < m_config->warp_size; i++) {
+    per_thread_info &t = m_per_scalar_thread[i];
+    if (!t.RT_mem_accesses.empty() && t.RT_mem_accesses.front().address == base) {
+      t.wd_req_addr = addr;
+      t.wd_req_base = base;
+      t.wd_req_cycle = cycle;
+      t.wd_req_status = status;
+      t.wd_req_n++;
+    }
+  }
+}
+
+unsigned long long warp_inst_t::wd_last_progress() const {
+  unsigned long long last = m_start_cycle;
+  if (m_wd_undo_cycle > last) last = m_wd_undo_cycle;
+  for (unsigned i = 0; i < m_config->warp_size; i++) {
+    const per_thread_info &t = m_per_scalar_thread[i];
+    if (t.wd_req_cycle > last) last = t.wd_req_cycle;
+    if (t.wd_resp_cycle > last) last = t.wd_resp_cycle;
+  }
+  return last;
+}
+
+void warp_inst_t::undo_rt_access(new_addr_type addr){
+std::pair<new_addr_type, unsigned> address_size_pair (addr, 32);
   assert (m_next_rt_accesses_set.find(address_size_pair) == m_next_rt_accesses_set.end());
   
   // Repackage address into a transaction record
@@ -1085,6 +1112,8 @@ void warp_inst_t::undo_rt_access(new_addr_type addr){
 
   m_next_rt_accesses.push_front(mem_record);
   m_next_rt_accesses_set.insert(address_size_pair);
+  m_wd_undo_n++;
+  m_wd_undo_cycle = g_rt_wd_now;
   RT_DPRINTF("UNDO: 0x%x added back to queue\n", addr);
 }
 
@@ -1154,10 +1183,14 @@ bool warp_inst_t::process_returned_mem_access(bool &mem_record_done, unsigned ti
         }
       }
       thread_found = true;
+      m_per_scalar_thread[tid].wd_resp_addr = addr;
+      m_per_scalar_thread[tid].wd_resp_base = uncoalesced_base_addr;
+      m_per_scalar_thread[tid].wd_resp_cycle = g_rt_wd_now;
+      m_per_scalar_thread[tid].wd_resp_n++;
     }
-    
+
     // If the RT_mem_accesses is now empty, then the last memory request has returned and the thread is almost done
-    if (m_per_scalar_thread[tid].RT_mem_accesses.empty()) {
+if (m_per_scalar_thread[tid].RT_mem_accesses.empty()) {
       unsigned long long current_cycle =  GPGPU_Context()->the_gpgpusim->g_the_gpu->gpu_tot_sim_cycle +
                                           GPGPU_Context()->the_gpgpusim->g_the_gpu->gpu_sim_cycle;
       m_per_scalar_thread[tid].end_cycle = current_cycle + m_per_scalar_thread[tid].intersection_delay;
