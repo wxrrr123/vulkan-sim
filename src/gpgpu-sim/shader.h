@@ -1368,8 +1368,19 @@ class rt_unit : public pipelined_simd_unit {
       unsigned long long m_wd_nofind = 0, m_wd_nofind_cycle = 0;
       new_addr_type m_wd_nofind_addr = 0;
 
+      // RT requests whose L1D response never reached their warp
+      // (-gpgpu_rt_lost_resp_diag, -gpgpu_rt_fix_lost_resp)
+      std::set<const mem_fetch *> m_rt_delivered;  // offered to their warp at the fill
+      std::map<const mem_fetch *, char> m_rt_merge_kind;  // merged into: 'a' 'b' 'c'
+      void rt_lost_response(mem_fetch *mf);
+
       unsigned cacheline_count;
 };
+
+// RT requests that left the L1D MSHR without their response reaching the
+// warp, by kind (a, b, c, other), and how many of them were delivered late
+extern unsigned long long g_rt_lost[4];
+extern unsigned long long g_rt_lost_fixed;
 
 class ldst_unit : public pipelined_simd_unit {
  public:
@@ -1789,6 +1800,8 @@ class shader_core_config : public core_config {
   unsigned m_rt_max_warps;
   unsigned m_rt_max_mshr_entries;
   unsigned m_rt_watchdog;  // cycles a stalled RT warp may go without progress (0 = off)
+  bool m_rt_lost_resp_diag;  // report RT requests dropped by the L1D without a response
+  bool m_rt_fix_lost_resp;   // deliver those requests to their warp instead
   bool m_rt_coalesce_warps;
 bool m_rt_use_l1d;
   bool m_rt_perfect_mem;

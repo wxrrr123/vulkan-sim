@@ -910,6 +910,13 @@ class mshr_table {
   void mark_ready(new_addr_type block_addr, bool &has_atomic);
   /// Returns true if ready accesses exist
   bool access_ready() const { return !m_current_response.empty(); }
+  /// Returns true if the entry for block_addr is filled and not yet drained
+  bool is_ready(new_addr_type block_addr) const {
+    for (std::list<new_addr_type>::const_iterator i = m_current_response.begin();
+         i != m_current_response.end(); ++i)
+      if (*i == block_addr) return true;
+    return false;
+  }
   /// Returns next ready access
   mem_fetch *next_access();
   // Checks if next access it for ray tracing
@@ -1201,6 +1208,9 @@ class baseline_cache : public cache_t {
       return m_mshrs.get_mf_list(block_addr);
     else 
       return {};
+  }
+  bool mshr_ready(new_addr_type block_addr) const {
+    return m_mshrs.is_ready(block_addr);
   }
   
   unsigned num_mshr_entries() {

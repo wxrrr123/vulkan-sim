@@ -384,6 +384,15 @@ void shader_core_config::reg_options(class OptionParser *opp) {
       "cycles, with its threads' last request/response (0 = off; no timing effect)",
       "0");
   option_parser_register(
+      opp, "-gpgpu_rt_lost_resp_diag", OPT_BOOL, &m_rt_lost_resp_diag,
+      "report RT reads that leave the L1D MSHR without their response reaching "
+      "the warp (no timing effect)",
+      "0");
+  option_parser_register(
+      opp, "-gpgpu_rt_fix_lost_resp", OPT_BOOL, &m_rt_fix_lost_resp,
+      "deliver such RT reads to their warp when they leave the MSHR (also reports)",
+      "0");
+  option_parser_register(
       opp, "-gpgpu_rt_coalesce_warps", OPT_BOOL, &m_rt_coalesce_warps,
 "try to coalesce memory requests between warps ",
       "0");
@@ -1480,6 +1489,9 @@ void gpgpu_sim::gpu_print_stat() {
   fprintf(statfout, "gpu_tot_sim_insn = %lld\n", gpu_tot_sim_insn + gpu_sim_insn);
   fprintf(statfout, "spill_inject_threads: ld = %llu st = %llu\n",
           g_spill_threads[0], g_spill_threads[1]);
+  if (m_shader_config->m_rt_lost_resp_diag || m_shader_config->m_rt_fix_lost_resp)
+    fprintf(statfout, "rt_lost_resp: a = %llu b = %llu c = %llu other = %llu fixed = %llu\n",
+            g_rt_lost[0], g_rt_lost[1], g_rt_lost[2], g_rt_lost[3], g_rt_lost_fixed);
   fprintf(statfout, "l1_local_sector_bytes: rd_hit = %llu rd_hit_reserved = %llu rd_miss = %llu "
           "wr_hit = %llu wr_hit_reserved = %llu wr_miss = %llu\n",
           g_l1_local_sector_bytes[0][0], g_l1_local_sector_bytes[0][1], g_l1_local_sector_bytes[0][2],
@@ -2275,8 +2287,10 @@ void gpgpu_sim::cycle() {
     }
 
     if (m_shader_config->m_rt_watchdog && !(gpu_sim_cycle % 1000000)) {
-      printf("RT-WD heartbeat: gpu_sim_cycle %llu insn %llu completed_cta %u\n",
-             gpu_sim_cycle, gpu_sim_insn, gpu_completed_cta);
+      printf("RT-WD heartbeat: gpu_sim_cycle %llu insn %llu completed_cta %u "
+             "rt_lost a %llu b %llu c %llu other %llu fixed %llu\n",
+             gpu_sim_cycle, gpu_sim_insn, gpu_completed_cta, g_rt_lost[0],
+             g_rt_lost[1], g_rt_lost[2], g_rt_lost[3], g_rt_lost_fixed);
       fflush(stdout);
     }
     if (!(gpu_sim_cycle % 300000)) {

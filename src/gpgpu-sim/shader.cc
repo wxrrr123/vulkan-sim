@@ -3360,6 +3360,15 @@ void rt_unit::process_memory_response(mem_fetch* mf, warp_inst_t &pipe_reg) {
       unsigned requester_thread_found = 0;
       for (auto it=response_mf.begin(); it!=response_mf.end(); ++it) {
         mem_fetch* response = *it;
+        // Lost-response tracking: a merged request with another base address
+        // is not matched below (threads are matched by mf's base address)
+        if ((m_config->m_rt_lost_resp_diag || m_config->m_rt_fix_lost_resp) &&
+            response->israytrace()) {
+          if (response->get_uncoalesced_base_addr() == mf->get_uncoalesced_base_addr())
+            m_rt_delivered.insert(response);
+          else
+            m_rt_merge_kind[response] = 'c';
+        }
         // Check all the warps
         for (auto it=m_current_warps.begin(); it!=m_current_warps.end(); it++) {
           if (it->second.warp_id() == response->get_wid()) {
@@ -3467,6 +3476,37 @@ void rt_unit::memory_cycle(warp_inst_t &inst) {
 }
 
 
+unsigned long long g_rt_lost[4] = {0, 0, 0, 0};
+unsigned long long g_rt_lost_fixed = 0;
+
+// An RT read left the L1D MSHR without its response ever being offered to its
+// warp: count and report it, and with -gpgpu_rt_fix_lost_resp deliver it now
+// (by its own address and base address, as process_memory_response would).
+void rt_unit::rt_lost_response(mem_fetch *mf) {
+  std::map<const mem_fetch *, char>::iterator k = m_rt_merge_kind.find(mf);
+  char kind = k == m_rt_merge_kind.end() ? '-' : k->second;
+  g_rt_lost[kind == 'a' ? 0 : kind == 'b' ? 1 : kind == 'c' ? 2 : 3]++;
+  unsigned threads = 0;  // threads waiting for it
+  for (auto it = m_current_warps.begin(); it != m_current_warps.end(); ++it) {
+    if (it->second.warp_id() != mf->get_wid()) continue;
+    if (m_config->m_rt_fix_lost_resp) {
+      threads += it->second.process_returned_mem_access(mf);
+    } else {
+      warp_inst_t probe = it->second;
+      threads += probe.process_returned_mem_access(mf);
+    }
+  }
+  if (m_config->m_rt_fix_lost_resp && threads) g_rt_lost_fixed++;
+  unsigned long long n = g_rt_lost[0] + g_rt_lost[1] + g_rt_lost[2] + g_rt_lost[3];
+  if (n <= 200)
+    printf("RT-LOST: cycle %llu sid %u wid %u addr 0x%llx base 0x%llx kind %c "
+           "waiting threads %u%s\n",
+           m_core->get_gpu()->gpu_sim_cycle + m_core->get_gpu()->gpu_tot_sim_cycle,
+           m_sid, mf->get_wid(), (unsigned long long)mf->get_addr(),
+           (unsigned long long)mf->get_uncoalesced_base_addr(), kind, threads,
+           m_config->m_rt_fix_lost_resp && threads ? " (delivered)" : "");
+}
+
 void rt_unit::writeback() {
   while (m_L0_complet->access_ready()) {
     mem_fetch *mf = m_L0_complet->next_access();
@@ -3478,6 +3518,10 @@ void rt_unit::writeback() {
   while (L1D->access_ready() && L1D->next_access_rt()) {
     mem_fetch *mf = L1D->next_access();
     // m_next_wb = mf->get_inst();
+    if (m_config->m_rt_lost_resp_diag || m_config->m_rt_fix_lost_resp) {
+      if (!m_rt_delivered.erase(mf) && !mf->get_is_write()) rt_lost_response(mf);
+      m_rt_merge_kind.erase(mf);
+    }
     delete mf;
     // serviced_client = next_client;
   }
@@ -3625,6 +3669,7 @@ mem_fetch* rt_unit::process_memory_access_queue(warp_inst_t &inst) {
 
 void rt_unit::process_cache_access(baseline_cache *cache, warp_inst_t &inst, mem_fetch *mf) {
   assert(mf != NULL);
+  char lost_kind = 0;  // what this read merged into (lost-response tracking)
 
   enum cache_request_status status;
   std::list<cache_event> events;
@@ -3685,6 +3730,21 @@ void rt_unit::process_cache_access(baseline_cache *cache, warp_inst_t &inst, mem
   else {
     RT_DPRINTF("Shader %d: Sending cache request for 0x%x\n", m_sid, mf->get_uncoalesced_addr());
     
+    // Lost-response tracking: what the L1D MSHR already holds for this sector.
+    // (a) an entry already filled, (b) an entry the LDST unit sent, (c) an RT
+    // entry for another base address; a plain merge is delivered at the fill.
+    if ((m_config->m_rt_lost_resp_diag || m_config->m_rt_fix_lost_resp) &&
+        (void *)cache == (void *)L1D && !mf->get_is_write()) {
+      std::list<mem_fetch *> held = L1D->probe_mshr(mf->get_addr());
+      if (!held.empty())
+        lost_kind = L1D->mshr_ready(mf->get_addr()) ? 'a'
+                    : !held.front()->israytrace() ? 'b'
+                    : held.front()->get_uncoalesced_base_addr() !=
+                              mf->get_uncoalesced_base_addr()
+                        ? 'c'
+                        : 0;
+    }
+
     m_stats->rt_mem_requests++;
 
     // Access cache
@@ -3699,6 +3759,7 @@ void rt_unit::process_cache_access(baseline_cache *cache, warp_inst_t &inst, mem
   new_addr_type base_addr = mf->get_uncoalesced_base_addr();
   if (m_config->m_rt_watchdog && !mf->get_is_write())
     inst.wd_note_request(addr, base_addr, g_rt_wd_now, (int)status);
+  if (lost_kind && status == MISS) m_rt_merge_kind[mf] = lost_kind;
 
   // Stalled
 if ((void *)cache == (void *)L1D && status != RESERVATION_FAIL) {
